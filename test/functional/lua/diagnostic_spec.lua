@@ -79,10 +79,6 @@ describe('vim.diagnostic', function()
     ]])
   end)
 
-  after_each(function()
-    clear()
-  end)
-
   it('creates highlight groups', function()
     command('runtime plugin/diagnostic.vim')
     eq({
@@ -864,7 +860,7 @@ end)
       ]])
     end)
 
-    it('returns only requested diagnostics when severity is supplied', function()
+    it('returns only requested diagnostics when severity range is supplied', function()
       eq({2, 3, 2}, exec_lua [[
         vim.diagnostic.set(diagnostic_ns, diagnostic_bufnr, {
           make_error("Error 1", 1, 1, 1, 5),
@@ -880,6 +876,28 @@ end)
             severity = {
               min=vim.diagnostic.severity.INFO,
               max=vim.diagnostic.severity.WARN,
+            }
+          }),
+        }
+      ]])
+    end)
+
+    it('returns only requested diagnostics when severities are supplied', function()
+      eq({1, 1, 2}, exec_lua [[
+        vim.diagnostic.set(diagnostic_ns, diagnostic_bufnr, {
+          make_error("Error 1", 1, 1, 1, 5),
+          make_warning("Warning on Server 1", 1, 1, 2, 3),
+          make_info("Ignored information", 1, 1, 2, 3),
+          make_hint("Here's a hint", 1, 1, 2, 3),
+        })
+
+        return {
+          #vim.diagnostic.get(diagnostic_bufnr, { severity = {vim.diagnostic.severity.WARN} }),
+          #vim.diagnostic.get(diagnostic_bufnr, { severity = {vim.diagnostic.severity.ERROR} }),
+          #vim.diagnostic.get(diagnostic_bufnr, {
+            severity = {
+              vim.diagnostic.severity.INFO,
+              vim.diagnostic.severity.WARN,
             }
           }),
         }
@@ -1046,7 +1064,7 @@ end)
           local virt_text = get_virt_text_extmarks(diagnostic_ns)[1][4].virt_text
 
           local virt_texts = {}
-          for i = 2, #virt_text do
+          for i = 2, #virt_text - 1 do
             table.insert(virt_texts, (string.gsub(virt_text[i][2], "DiagnosticVirtualText", "")))
           end
 
@@ -1090,7 +1108,7 @@ end)
         })
 
         local extmarks = get_virt_text_extmarks(diagnostic_ns)
-        local virt_text = extmarks[1][4].virt_text[2][1]
+        local virt_text = extmarks[1][4].virt_text[3][1]
         return virt_text
       ]]
       eq(' source x: Some error', result)
@@ -1105,7 +1123,7 @@ end)
         }, diagnostic_ns)
 
         local extmarks = get_virt_text_extmarks(diagnostic_ns)
-        local virt_text = extmarks[1][4].virt_text[2][1]
+        local virt_text = extmarks[1][4].virt_text[3][1]
         return virt_text
       ]]
       eq(' Some error', result)
@@ -1125,7 +1143,7 @@ end)
         })
 
         local extmarks = get_virt_text_extmarks(diagnostic_ns)
-        local virt_text = {extmarks[1][4].virt_text[2][1], extmarks[2][4].virt_text[2][1]}
+        local virt_text = {extmarks[1][4].virt_text[3][1], extmarks[2][4].virt_text[3][1]}
         return virt_text
       ]]
       eq(' source x: Some error', result[1])
@@ -1155,8 +1173,8 @@ end)
         local extmarks = get_virt_text_extmarks(diagnostic_ns)
         return {extmarks[1][4].virt_text, extmarks[2][4].virt_text}
       ]]
-      eq(" 👀 Warning", result[1][2][1])
-      eq(" 🔥 Error", result[2][2][1])
+      eq(" 👀 Warning", result[1][3][1])
+      eq(" 🔥 Error", result[2][3][1])
     end)
 
     it('includes source for formatted diagnostics', function()
@@ -1183,8 +1201,48 @@ end)
         local extmarks = get_virt_text_extmarks(diagnostic_ns)
         return {extmarks[1][4].virt_text, extmarks[2][4].virt_text}
       ]]
-      eq(" some_linter: 👀 Warning", result[1][2][1])
-      eq(" another_linter: 🔥 Error", result[2][2][1])
+      eq(" some_linter: 👀 Warning", result[1][3][1])
+      eq(" another_linter: 🔥 Error", result[2][3][1])
+    end)
+
+    it('can add a prefix to virtual text', function()
+      eq('E Some error',  exec_lua [[
+        local diagnostics = {
+          make_error('Some error', 0, 0, 0, 0),
+        }
+
+        vim.diagnostic.set(diagnostic_ns, diagnostic_bufnr, diagnostics, {
+          underline = false,
+          virtual_text = {
+            prefix = 'E',
+            suffix = '',
+          }
+        })
+
+        local extmarks = get_virt_text_extmarks(diagnostic_ns)
+        local prefix = extmarks[1][4].virt_text[2][1]
+        local message = extmarks[1][4].virt_text[3][1]
+        return prefix .. message
+      ]])
+
+      eq('[err-code] Some error',  exec_lua [[
+        local diagnostics = {
+          make_error('Some error', 0, 0, 0, 0, nil, 'err-code'),
+        }
+
+        vim.diagnostic.set(diagnostic_ns, diagnostic_bufnr, diagnostics, {
+          underline = false,
+          virtual_text = {
+            prefix = function(diag) return string.format('[%s]', diag.code) end,
+            suffix = '',
+          }
+        })
+
+        local extmarks = get_virt_text_extmarks(diagnostic_ns)
+        local prefix = extmarks[1][4].virt_text[2][1]
+        local message = extmarks[1][4].virt_text[3][1]
+        return prefix .. message
+      ]])
     end)
 
     it('can add a suffix to virtual text', function()
@@ -1202,7 +1260,7 @@ end)
         })
 
         local extmarks = get_virt_text_extmarks(diagnostic_ns)
-        local virt_text = extmarks[1][4].virt_text[2][1]
+        local virt_text = extmarks[1][4].virt_text[3][1]
         return virt_text
       ]])
 
@@ -1220,7 +1278,7 @@ end)
         })
 
         local extmarks = get_virt_text_extmarks(diagnostic_ns)
-        local virt_text = extmarks[1][4].virt_text[2][1]
+        local virt_text = extmarks[1][4].virt_text[3][1]
         return virt_text
       ]])
     end)

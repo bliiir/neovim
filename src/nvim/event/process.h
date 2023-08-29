@@ -5,7 +5,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "nvim/eval/typval.h"
 #include "nvim/eval/typval_defs.h"
 #include "nvim/event/loop.h"
 #include "nvim/event/multiqueue.h"
@@ -33,6 +32,7 @@ struct process {
   uint64_t stopped_time;  // process_stop() timestamp
   const char *cwd;
   char **argv;
+  const char *exepath;
   dict_T *env;
   Stream in, out, err;
   /// Exit handler. If set, user must call process_free().
@@ -55,6 +55,7 @@ static inline Process process_init(Loop *loop, ProcessType type, void *data)
     .stopped_time = 0,
     .cwd = NULL,
     .argv = NULL,
+    .exepath = NULL,
     .in = { .closed = false },
     .out = { .closed = false },
     .err = { .closed = false },
@@ -65,6 +66,12 @@ static inline Process process_init(Loop *loop, ProcessType type, void *data)
     .detach = false,
     .fwd_err = false,
   };
+}
+
+/// Get the path to the executable of the process.
+static inline const char *process_get_exepath(Process *proc)
+{
+  return proc->exepath != NULL ? proc->exepath : proc->argv[0];
 }
 
 static inline bool process_is_stopped(Process *proc)

@@ -76,7 +76,7 @@ static void log_path_init(void)
     char *failed_dir = NULL;
     bool log_dir_failure = false;
     if (!os_isdir(loghome)) {
-      log_dir_failure = (os_mkdir_recurse(loghome, 0700, &failed_dir) != 0);
+      log_dir_failure = (os_mkdir_recurse(loghome, 0700, &failed_dir, NULL) != 0);
     }
     XFREE_CLEAR(loghome);
     // Invalid $NVIM_LOG_FILE or failed to expand; fall back to default.
@@ -131,7 +131,7 @@ void log_unlock(void)
 /// @return true if log was emitted normally, false if failed or recursive
 bool logmsg(int log_level, const char *context, const char *func_name, int line_num, bool eol,
             const char *fmt, ...)
-  FUNC_ATTR_UNUSED FUNC_ATTR_PRINTF(6, 7)
+  FUNC_ATTR_PRINTF(6, 7)
 {
   static bool recursive = false;
   static bool did_msg = false;  // Showed recursion message?
@@ -152,7 +152,17 @@ bool logmsg(int log_level, const char *context, const char *func_name, int line_
 #ifdef EXITFREE
   // Logging after we've already started freeing all our memory will only cause
   // pain.  We need access to VV_PROGPATH, homedir, etc.
-  assert(!entered_free_all_mem);
+  if (entered_free_all_mem) {
+    fprintf(stderr, "FATAL: error in free_all_mem\n %s %s %d: ", context, func_name, line_num);
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(stderr, fmt, args);
+    va_end(args);
+    if (eol) {
+      fprintf(stderr, "\n");
+    }
+    abort();
+  }
 #endif
 
   log_lock();

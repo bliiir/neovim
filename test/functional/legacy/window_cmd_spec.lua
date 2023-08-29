@@ -3,7 +3,36 @@ local Screen = require('test.functional.ui.screen')
 local clear = helpers.clear
 local exec = helpers.exec
 local exec_lua = helpers.exec_lua
+local command = helpers.command
 local feed = helpers.feed
+
+-- oldtest: Test_window_cmd_ls0_split_scrolling()
+it('scrolling with laststatus=0 and :botright split', function()
+  clear('--cmd', 'set ruler')
+  local screen = Screen.new(40, 10)
+  screen:set_default_attr_ids({
+    [1] = {reverse = true},  -- StatusLineNC
+  })
+  screen:attach()
+  exec([[
+    set laststatus=0
+    call setline(1, range(1, 100))
+    normal! G
+  ]])
+  command('botright split')
+  screen:expect([[
+    97                                      |
+    98                                      |
+    99                                      |
+    100                                     |
+    {1:[No Name] [+]         100,1          Bot}|
+    97                                      |
+    98                                      |
+    99                                      |
+    ^100                                     |
+                          100,1         Bot |
+  ]])
+end)
 
 describe('splitkeep', function()
   local screen
@@ -12,6 +41,61 @@ describe('splitkeep', function()
     clear('--cmd', 'set splitkeep=screen')
     screen = Screen.new()
     screen:attach()
+  end)
+
+  -- oldtest: Test_splitkeep_cursor()
+  it('does not adjust cursor in window that did not change size', function()
+    screen:try_resize(75, 8)
+    -- FIXME: bottom window is different without the "vsplit | close"
+    exec([[
+      vsplit | close
+      set scrolloff=5
+      set splitkeep=screen
+      autocmd CursorMoved * wincmd p | wincmd p
+      call setline(1, range(1, 200))
+      func CursorEqualize()
+        call cursor(100, 1)
+        wincmd =
+      endfunc
+      wincmd s
+      call CursorEqualize()
+    ]])
+
+    screen:expect([[
+      99                                                                         |
+      ^100                                                                        |
+      101                                                                        |
+      [No Name] [+]                                                              |
+      5                                                                          |
+      6                                                                          |
+      [No Name] [+]                                                              |
+                                                                                 |
+    ]])
+
+    feed('j')
+    screen:expect([[
+      100                                                                        |
+      ^101                                                                        |
+      102                                                                        |
+      [No Name] [+]                                                              |
+      5                                                                          |
+      6                                                                          |
+      [No Name] [+]                                                              |
+                                                                                 |
+    ]])
+
+    command('set scrolloff=0')
+    feed('G')
+    screen:expect([[
+      198                                                                        |
+      199                                                                        |
+      ^200                                                                        |
+      [No Name] [+]                                                              |
+      5                                                                          |
+      6                                                                          |
+      [No Name] [+]                                                              |
+                                                                                 |
+    ]])
   end)
 
   -- oldtest: Test_splitkeep_callback()
@@ -223,6 +307,31 @@ describe('splitkeep', function()
       ~                                                    |
       [No Name]                                            |
                                                            |
+    ]])
+  end)
+
+  -- oldtest: Test_splitkeep_skipcol()
+  it('skipcol is not reset unnecessarily and is copied to new window', function()
+    screen:try_resize(40, 12)
+    exec([[
+      set splitkeep=topline smoothscroll splitbelow scrolloff=0
+      call setline(1, 'with lots of text in one line '->repeat(6))
+      norm 2
+      wincmd s
+    ]])
+    screen:expect([[
+      <<<e line with lots of text in one line |
+      with lots of text in one line with lots |
+      of text in one line                     |
+      ~                                       |
+      [No Name] [+]                           |
+      <<<e line with lots of text in one line |
+      ^with lots of text in one line with lots |
+      of text in one line                     |
+      ~                                       |
+      ~                                       |
+      [No Name] [+]                           |
+                                              |
     ]])
   end)
 end)

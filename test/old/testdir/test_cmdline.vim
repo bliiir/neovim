@@ -453,10 +453,10 @@ func Test_getcompletion()
   let l = getcompletion('blahblah', 'augroup')
   call assert_equal([], l)
 
-  let l = getcompletion('', 'behave')
-  call assert_true(index(l, 'mswin') >= 0)
-  let l = getcompletion('not', 'behave')
-  call assert_equal([], l)
+  " let l = getcompletion('', 'behave')
+  " call assert_true(index(l, 'mswin') >= 0)
+  " let l = getcompletion('not', 'behave')
+  " call assert_equal([], l)
 
   let l = getcompletion('', 'color')
   call assert_true(index(l, 'default') >= 0)
@@ -601,6 +601,8 @@ func Test_getcompletion()
   call assert_true(index(l, 'taglist(') >= 0)
   let l = getcompletion('call paint', 'cmdline')
   call assert_equal([], l)
+  let l = getcompletion('autocmd BufEnter * map <bu', 'cmdline')
+  call assert_equal(['<buffer>'], l)
 
   func T(a, c, p)
     let g:cmdline_compl_params = [a:a, a:c, a:p]
@@ -652,7 +654,7 @@ func Test_getcompletion()
 
   call assert_fails("call getcompletion('\\\\@!\\\\@=', 'buffer')", 'E871:')
   call assert_fails('call getcompletion("", "burp")', 'E475:')
-  call assert_fails('call getcompletion("abc", [])', 'E475:')
+  call assert_fails('call getcompletion("abc", [])', 'E1174:')
 endfunc
 
 " Test for getcompletion() with "fuzzy" in 'wildoptions'
@@ -719,7 +721,7 @@ endfunc
 func Test_shellcmd_completion()
   let save_path = $PATH
 
-  call mkdir('Xpathdir/Xpathsubdir', 'p')
+  call mkdir('Xpathdir/Xpathsubdir', 'pR')
   call writefile([''], 'Xpathdir/Xfile.exe')
   call setfperm('Xpathdir/Xfile.exe', 'rwx------')
 
@@ -735,17 +737,15 @@ func Test_shellcmd_completion()
   call insert(expected, 'Xfile.exe')
   call assert_equal(expected, actual)
 
-  call delete('Xpathdir', 'rf')
   let $PATH = save_path
 endfunc
 
 func Test_expand_star_star()
-  call mkdir('a/b', 'p')
-  call writefile(['asdfasdf'], 'a/b/fileXname')
-  call feedkeys(":find **/fileXname\<Tab>\<CR>", 'xt')
-  call assert_equal('find a/b/fileXname', @:)
+  call mkdir('a/b/c', 'pR')
+  call writefile(['asdfasdf'], 'a/b/c/fileXname')
+  call feedkeys(":find a/**/fileXname\<Tab>\<CR>", 'xt')
+  call assert_equal('find a/b/c/fileXname', @:)
   bwipe!
-  call delete('a', 'rf')
 endfunc
 
 func Test_cmdline_paste()
@@ -1253,6 +1253,30 @@ func Test_cmdline_complete_various()
   call assert_equal('"py3file', @:)
 endfunc
 
+" Test that expanding a pattern doesn't interfere with cmdline completion.
+func Test_expand_during_cmdline_completion()
+  func ExpandStuff()
+    badd <script>:p:h/README.*
+    call assert_equal(expand('<script>:p:h') .. '/README.txt', bufname('$'))
+    $bwipe
+    call assert_equal('README.txt', expand('README.*'))
+    call assert_equal(['README.txt'], getcompletion('README.*', 'file'))
+  endfunc
+  augroup test_CmdlineChanged
+    autocmd!
+    autocmd CmdlineChanged * call ExpandStuff()
+  augroup END
+
+  call feedkeys(":sign \<Tab>\<Tab>\<Tab>\<Tab>\<C-B>\"\<CR>", 'xt')
+  call assert_equal('"sign place', @:)
+
+  augroup test_CmdlineChanged
+    au!
+  augroup END
+  augroup! test_CmdlineChanged
+  delfunc ExpandStuff
+endfunc
+
 " Test for 'wildignorecase'
 func Test_cmdline_wildignorecase()
   CheckUnix
@@ -1458,7 +1482,7 @@ func Test_verbose_option()
   call writefile(lines, 'XTest_verbose')
 
   let buf = RunVimInTerminal('-S XTest_verbose', {'rows': 12})
-  call term_wait(buf, 100)
+  call TermWait(buf, 50)
   call term_sendkeys(buf, ":DoSomething\<CR>")
   call VerifyScreenDump(buf, 'Test_verbose_option_1', {})
 
@@ -1536,7 +1560,7 @@ func Test_cmdwin_restore()
   call writefile(lines, 'XTest_restore')
 
   let buf = RunVimInTerminal('-S XTest_restore', {'rows': 12})
-  call term_wait(buf, 100)
+  call TermWait(buf, 50)
   call term_sendkeys(buf, "q:")
   call VerifyScreenDump(buf, 'Test_cmdwin_restore_1', {})
 
@@ -1554,6 +1578,21 @@ func Test_cmdwin_restore()
   " clean up
   call StopVimInTerminal(buf)
   call delete('XTest_restore')
+endfunc
+
+func Test_cmdwin_no_terminal()
+  CheckFeature cmdwin
+  CheckFeature terminal
+  CheckNotMSWindows
+
+  let buf = RunVimInTerminal('', {'rows': 12})
+  call TermWait(buf, 50)
+  call term_sendkeys(buf, ":set cmdheight=2\<CR>")
+  call term_sendkeys(buf, "q:")
+  call term_sendkeys(buf, ":let buf = term_start(['/bin/echo'], #{hidden: 1})\<CR>")
+  call VerifyScreenDump(buf, 'Test_cmdwin_no_terminal', {})
+  call term_sendkeys(buf, ":q\<CR>")
+  call StopVimInTerminal(buf)
 endfunc
 
 func Test_buffers_lastused()
@@ -1663,7 +1702,7 @@ func Test_cmdlineclear_tabenter()
 
   call writefile(lines, 'XtestCmdlineClearTabenter')
   let buf = RunVimInTerminal('-S XtestCmdlineClearTabenter', #{rows: 10})
-  call term_wait(buf, 50)
+  call TermWait(buf, 25)
   " in one tab make the command line higher with CTRL-W -
   call term_sendkeys(buf, ":tabnew\<cr>\<C-w>-\<C-w>-gtgt")
   call VerifyScreenDump(buf, 'Test_cmdlineclear_tabenter', {})
@@ -1792,6 +1831,7 @@ func Test_cmd_bang_E135()
   augroup test_cmd_filter_E135
     au!
   augroup END
+  augroup! test_cmd_filter_E135
   %bwipe!
 endfunc
 
@@ -2280,7 +2320,7 @@ endfunc
 func Test_cmd_map_cmdlineChanged()
   let g:log = []
   cnoremap <F1> l<Cmd><CR>s
-  augroup test
+  augroup test_CmdlineChanged
     autocmd!
     autocmd CmdlineChanged : let g:log += [getcmdline()]
   augroup END
@@ -2296,9 +2336,10 @@ func Test_cmd_map_cmdlineChanged()
 
   unlet g:log
   cunmap <F1>
-  augroup test
+  augroup test_CmdlineChanged
     autocmd!
   augroup END
+  augroup! test_CmdlineChanged
 endfunc
 
 " Test for the 'suffixes' option
@@ -2770,6 +2811,7 @@ endfunc
 
 " :behave suboptions fuzzy completion
 func Test_fuzzy_completion_behave()
+  throw 'Skipped: Nvim removed :behave'
   set wildoptions&
   call feedkeys(":behave xm\<Tab>\<C-B>\"\<CR>", 'tx')
   call assert_equal('"behave xm', @:)
@@ -3475,16 +3517,23 @@ func Test_cmdline_complete_bang_cmd_argument()
   call assert_equal('"!vim test_cmdline.vim', @:)
 endfunc
 
-func Check_completion()
-  call assert_equal('let a', getcmdline())
-  call assert_equal(6, getcmdpos())
-  call assert_equal(7, getcmdscreenpos())
-  call assert_equal('var', getcmdcompltype())
-  return ''
+func Call_cmd_funcs()
+  return string([getcmdpos(), getcmdscreenpos(), getcmdcompltype()])
 endfunc
 
 func Test_screenpos_and_completion()
-  call feedkeys(":let a\<C-R>=Check_completion()\<CR>\<Esc>", "xt")
+  call assert_equal(0, getcmdpos())
+  call assert_equal(0, getcmdscreenpos())
+  call assert_equal('', getcmdcompltype())
+
+  cnoremap <expr> <F2> string([getcmdpos(), getcmdscreenpos(), getcmdcompltype()])
+  call feedkeys(":let a\<F2>\<C-B>\"\<CR>", "xt")
+  call assert_equal("\"let a[6, 7, 'var']", @:)
+  call feedkeys(":quit \<F2>\<C-B>\"\<CR>", "xt")
+  call assert_equal("\"quit [6, 7, '']", @:)
+  call feedkeys(":nosuchcommand \<F2>\<C-B>\"\<CR>", "xt")
+  call assert_equal("\"nosuchcommand [15, 16, '']", @:)
+  cunmap <F2>
 endfunc
 
 func Test_recursive_register()
@@ -3532,6 +3581,14 @@ endfunc
 
 func Test_setcmdline()
   func SetText(text, pos)
+    call assert_equal(0, setcmdline(v:_null_string))
+    call assert_equal('', getcmdline())
+    call assert_equal(1, getcmdpos())
+
+    call assert_equal(0, setcmdline(''[: -1]))
+    call assert_equal('', getcmdline())
+    call assert_equal(1, getcmdpos())
+
     autocmd CmdlineChanged * let g:cmdtype = expand('<afile>')
     call assert_equal(0, setcmdline(a:text))
     call assert_equal(a:text, getcmdline())
@@ -3581,6 +3638,68 @@ func Test_setcmdline()
   call feedkeys(":a\<CR>", 'tx')
   call assert_equal('let foo=0', @:)
   cunmap a
+endfunc
+
+func Test_rulerformat_position()
+  CheckScreendump
+
+  let buf = RunVimInTerminal('', #{rows: 2, cols: 20})
+  call term_sendkeys(buf, ":set ruler rulerformat=longish\<CR>")
+  call term_sendkeys(buf, ":set laststatus=0 winwidth=1\<CR>")
+  call term_sendkeys(buf, "\<C-W>v\<C-W>|\<C-W>p")
+  call VerifyScreenDump(buf, 'Test_rulerformat_position', {})
+
+  " clean up
+  call StopVimInTerminal(buf)
+endfunc
+
+func Test_getcompletion_usercmd()
+  command! -nargs=* -complete=command TestCompletion echo <q-args>
+
+  call assert_equal(getcompletion('', 'cmdline'),
+        \ getcompletion('TestCompletion ', 'cmdline'))
+  call assert_equal(['<buffer>'],
+        \ getcompletion('TestCompletion map <bu', 'cmdline'))
+
+  delcom TestCompletion
+endfunc
+
+func Test_custom_completion()
+  func CustomComplete1(lead, line, pos)
+    return "a\nb\nc"
+  endfunc
+  func CustomComplete2(lead, line, pos)
+    return ['a', 'b']->filter({ _, val -> val->stridx(a:lead) == 0 })
+  endfunc
+  func Check_custom_completion()
+    call assert_equal('custom,CustomComplete1', getcmdcompltype())
+    return ''
+  endfunc
+  func Check_customlist_completion()
+    call assert_equal('customlist,CustomComplete2', getcmdcompltype())
+    return ''
+  endfunc
+
+  command -nargs=1 -complete=custom,CustomComplete1 Test1 echo
+  command -nargs=1 -complete=customlist,CustomComplete2 Test2 echo
+
+  call feedkeys(":Test1 \<C-R>=Check_custom_completion()\<CR>\<Esc>", "xt")
+  call feedkeys(":Test2 \<C-R>=Check_customlist_completion()\<CR>\<Esc>", "xt")
+
+  call assert_fails("call getcompletion('', 'custom')", 'E475:')
+  call assert_fails("call getcompletion('', 'customlist')", 'E475:')
+
+  call assert_equal(getcompletion('', 'custom,CustomComplete1'), ['a', 'b', 'c'])
+  call assert_equal(getcompletion('', 'customlist,CustomComplete2'), ['a', 'b'])
+  call assert_equal(getcompletion('b', 'customlist,CustomComplete2'), ['b'])
+
+  delcom Test1
+  delcom Test2
+
+  delfunc CustomComplete1
+  delfunc CustomComplete2
+  delfunc Check_custom_completion
+  delfunc Check_customlist_completion
 endfunc
 
 " vim: shiftwidth=2 sts=2 expandtab

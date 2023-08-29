@@ -572,8 +572,8 @@ char *get_special_key_name(int c, int modifiers)
 /// @param[out]  did_simplify  found <C-H>, etc.
 ///
 /// @return Number of characters added to dst, zero for no match.
-unsigned int trans_special(const char **const srcp, const size_t src_len, char *const dst,
-                           const int flags, const bool escape_ks, bool *const did_simplify)
+unsigned trans_special(const char **const srcp, const size_t src_len, char *const dst,
+                       const int flags, const bool escape_ks, bool *const did_simplify)
   FUNC_ATTR_NONNULL_ARG(1, 3) FUNC_ATTR_WARN_UNUSED_RESULT
 {
   int modifiers = 0;
@@ -590,9 +590,9 @@ unsigned int trans_special(const char **const srcp, const size_t src_len, char *
 /// When "escape_ks" is true escape K_SPECIAL bytes in the character.
 /// The sequence is not NUL terminated.
 /// This is how characters in a string are encoded.
-unsigned int special_to_buf(int key, int modifiers, bool escape_ks, char *dst)
+unsigned special_to_buf(int key, int modifiers, bool escape_ks, char *dst)
 {
-  unsigned int dlen = 0;
+  unsigned dlen = 0;
 
   // Put the appropriate modifier in a string.
   if (modifiers != 0) {
@@ -608,9 +608,9 @@ unsigned int special_to_buf(int key, int modifiers, bool escape_ks, char *dst)
   } else if (escape_ks) {
     char *after = add_char2buf(key, dst + dlen);
     assert(after >= dst && (uintmax_t)(after - dst) <= UINT_MAX);
-    dlen = (unsigned int)(after - dst);
+    dlen = (unsigned)(after - dst);
   } else {
-    dlen += (unsigned int)utf_char2bytes(key, dst + dlen);
+    dlen += (unsigned)utf_char2bytes(key, dst + dlen);
   }
 
   return dlen;
@@ -825,6 +825,10 @@ int find_special_key_in_table(int c)
 int get_special_key_code(const char *name)
   FUNC_ATTR_NONNULL_ALL FUNC_ATTR_PURE FUNC_ATTR_WARN_UNUSED_RESULT
 {
+  if (name[0] == 't' && name[1] == '_' && name[2] != NUL && name[3] != NUL) {
+    return TERMCAP2KEY((uint8_t)name[2], (uint8_t)name[3]);
+  }
+
   for (int i = 0; key_names_table[i].name != NULL; i++) {
     const char *const table_name = key_names_table[i].name;
     int j;
@@ -873,6 +877,7 @@ int get_mouse_button(int code, bool *is_click, bool *is_drag)
 ///                    If `*bufp` is non-NULL, it will be used directly,
 ///                    and is assumed to be 128 bytes long (enough for transcoding LHS of mapping),
 ///                    and will be set to NULL in case of failure.
+/// @param[in]  sid_arg  Script ID to use for <SID>, or 0 to use current_sctx
 /// @param[in]  flags  REPTERM_FROM_PART    see above
 ///                    REPTERM_DO_LT        also translate <lt>
 ///                    REPTERM_NO_SPECIAL   do not accept <key> notation
@@ -882,7 +887,8 @@ int get_mouse_button(int code, bool *is_click, bool *is_drag)
 ///
 /// @return  The same as what `*bufp` is set to.
 char *replace_termcodes(const char *const from, const size_t from_len, char **const bufp,
-                        const int flags, bool *const did_simplify, const int cpo_flags)
+                        const scid_T sid_arg, const int flags, bool *const did_simplify,
+                        const int cpo_flags)
   FUNC_ATTR_NONNULL_ARG(1, 3)
 {
   ssize_t i;
@@ -905,19 +911,6 @@ char *replace_termcodes(const char *const from, const size_t from_len, char **co
 
   src = from;
 
-  // Check for #n at start only: function key n
-  if ((flags & REPTERM_FROM_PART) && from_len > 1 && src[0] == '#'
-      && ascii_isdigit(src[1])) {  // function key
-    result[dlen++] = (char)K_SPECIAL;
-    result[dlen++] = 'k';
-    if (src[1] == '0') {
-      result[dlen++] = ';';     // #0 is F10 is "k;"
-    } else {
-      result[dlen++] = src[1];  // #3 is F3 is "k3"
-    }
-    src += 2;
-  }
-
   // Copy each byte from *from to result[dlen]
   while (src <= end) {
     if (!allocated && dlen + 64 > buf_len) {
@@ -929,15 +922,15 @@ char *replace_termcodes(const char *const from, const size_t from_len, char **co
       // Replace <SID> by K_SNR <script-nr> _.
       // (room: 5 * 6 = 30 bytes; needed: 3 + <nr> + 1 <= 14)
       if (end - src >= 4 && STRNICMP(src, "<SID>", 5) == 0) {
-        if (current_sctx.sc_sid <= 0) {
+        if (sid_arg < 0 || (sid_arg == 0 && current_sctx.sc_sid <= 0)) {
           emsg(_(e_usingsid));
         } else {
+          const scid_T sid = sid_arg != 0 ? sid_arg : current_sctx.sc_sid;
           src += 5;
           result[dlen++] = (char)K_SPECIAL;
           result[dlen++] = (char)KS_EXTRA;
           result[dlen++] = KE_SNR;
-          snprintf(result + dlen, buf_len - dlen, "%" PRId64,
-                   (int64_t)current_sctx.sc_sid);
+          snprintf(result + dlen, buf_len - dlen, "%" PRId64, (int64_t)sid);
           dlen += strlen(result + dlen);
           result[dlen++] = '_';
           continue;
@@ -1002,7 +995,7 @@ char *replace_termcodes(const char *const from, const size_t from_len, char **co
     }
 
     // skip multibyte char correctly
-    for (i = utfc_ptr2len_len((char *)src, (int)(end - src) + 1); i > 0; i--) {
+    for (i = utfc_ptr2len_len(src, (int)(end - src) + 1); i > 0; i--) {
       // If the character is K_SPECIAL, replace it with K_SPECIAL
       // KS_SPECIAL KE_FILLER.
       if (*src == (char)K_SPECIAL) {

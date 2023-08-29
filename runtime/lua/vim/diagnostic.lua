@@ -72,7 +72,6 @@ local bufs_waiting_to_update = setmetatable({}, bufnr_and_namespace_cacher_mt)
 
 local all_namespaces = {}
 
----@private
 local function to_severity(severity)
   if type(severity) == 'string' then
     return assert(
@@ -83,7 +82,6 @@ local function to_severity(severity)
   return severity
 end
 
----@private
 local function filter_by_severity(severity, diagnostics)
   if not severity then
     return diagnostics
@@ -96,15 +94,25 @@ local function filter_by_severity(severity, diagnostics)
     end, diagnostics)
   end
 
-  local min_severity = to_severity(severity.min) or M.severity.HINT
-  local max_severity = to_severity(severity.max) or M.severity.ERROR
+  if severity.min or severity.max then
+    local min_severity = to_severity(severity.min) or M.severity.HINT
+    local max_severity = to_severity(severity.max) or M.severity.ERROR
+
+    return vim.tbl_filter(function(t)
+      return t.severity <= min_severity and t.severity >= max_severity
+    end, diagnostics)
+  end
+
+  local severities = {}
+  for _, s in ipairs(severity) do
+    severities[to_severity(s)] = true
+  end
 
   return vim.tbl_filter(function(t)
-    return t.severity <= min_severity and t.severity >= max_severity
+    return severities[t.severity]
   end, diagnostics)
 end
 
----@private
 local function count_sources(bufnr)
   local seen = {}
   local count = 0
@@ -119,7 +127,6 @@ local function count_sources(bufnr)
   return count
 end
 
----@private
 local function prefix_source(diagnostics)
   return vim.tbl_map(function(d)
     if not d.source then
@@ -132,7 +139,6 @@ local function prefix_source(diagnostics)
   end, diagnostics)
 end
 
----@private
 local function reformat_diagnostics(format, diagnostics)
   vim.validate({
     format = { format, 'f' },
@@ -146,7 +152,6 @@ local function reformat_diagnostics(format, diagnostics)
   return formatted
 end
 
----@private
 local function enabled_value(option, namespace)
   local ns = namespace and M.get_namespace(namespace) or {}
   if ns.opts and type(ns.opts[option]) == 'table' then
@@ -160,7 +165,6 @@ local function enabled_value(option, namespace)
   return {}
 end
 
----@private
 local function resolve_optional_value(option, value, namespace, bufnr)
   if not value then
     return false
@@ -180,7 +184,6 @@ local function resolve_optional_value(option, value, namespace, bufnr)
   end
 end
 
----@private
 local function get_resolved_options(opts, namespace, bufnr)
   local ns = namespace and M.get_namespace(namespace) or {}
   -- Do not use tbl_deep_extend so that an empty table can be used to reset to default values
@@ -202,7 +205,6 @@ local diagnostic_severities = {
 }
 
 -- Make a map from DiagnosticSeverity -> Highlight Name
----@private
 local function make_highlight_map(base_name)
   local result = {}
   for k in pairs(diagnostic_severities) do
@@ -243,7 +245,6 @@ local define_default_signs = (function()
   end
 end)()
 
----@private
 local function get_bufnr(bufnr)
   if not bufnr or bufnr == 0 then
     return api.nvim_get_current_buf()
@@ -251,7 +252,6 @@ local function get_bufnr(bufnr)
   return bufnr
 end
 
----@private
 local function diagnostic_lines(diagnostics)
   if not diagnostics then
     return {}
@@ -269,7 +269,6 @@ local function diagnostic_lines(diagnostics)
   return diagnostics_by_line
 end
 
----@private
 local function set_diagnostic_cache(namespace, bufnr, diagnostics)
   for _, diagnostic in ipairs(diagnostics) do
     assert(diagnostic.lnum, 'Diagnostic line number is required')
@@ -284,7 +283,6 @@ local function set_diagnostic_cache(namespace, bufnr, diagnostics)
   diagnostic_cache[bufnr][namespace] = diagnostics
 end
 
----@private
 local function restore_extmarks(bufnr, last)
   for ns, extmarks in pairs(diagnostic_cache_extmarks[bufnr]) do
     local extmarks_current = api.nvim_buf_get_extmarks(bufnr, ns, 0, -1, { details = true })
@@ -306,7 +304,6 @@ local function restore_extmarks(bufnr, last)
   end
 end
 
----@private
 local function save_extmarks(namespace, bufnr)
   bufnr = get_bufnr(bufnr)
   if not diagnostic_attached_buffers[bufnr] then
@@ -326,13 +323,11 @@ end
 
 local registered_autocmds = {}
 
----@private
 local function make_augroup_key(namespace, bufnr)
   local ns = M.get_namespace(namespace)
   return string.format('DiagnosticInsertLeave:%s:%s', bufnr, ns.name)
 end
 
----@private
 local function execute_scheduled_display(namespace, bufnr)
   local args = bufs_waiting_to_update[bufnr][namespace]
   if not args then
@@ -348,7 +343,6 @@ end
 --- Table of autocmd events to fire the update for displaying new diagnostic information
 local insert_leave_auto_cmds = { 'InsertLeave', 'CursorHoldI' }
 
----@private
 local function schedule_display(namespace, bufnr, args)
   bufs_waiting_to_update[bufnr][namespace] = args
 
@@ -367,7 +361,6 @@ local function schedule_display(namespace, bufnr, args)
   end
 end
 
----@private
 local function clear_scheduled_display(namespace, bufnr)
   local key = make_augroup_key(namespace, bufnr)
 
@@ -377,7 +370,6 @@ local function clear_scheduled_display(namespace, bufnr)
   end
 end
 
----@private
 local function get_diagnostics(bufnr, opts, clamp)
   opts = opts or {}
 
@@ -392,7 +384,6 @@ local function get_diagnostics(bufnr, opts, clamp)
     end,
   })
 
-  ---@private
   local function add(b, d)
     if not opts.lnum or d.lnum == opts.lnum then
       if clamp and api.nvim_buf_is_loaded(b) then
@@ -416,7 +407,6 @@ local function get_diagnostics(bufnr, opts, clamp)
     end
   end
 
-  ---@private
   local function add_all_diags(buf, diags)
     for _, diagnostic in pairs(diags) do
       add(buf, diagnostic)
@@ -450,7 +440,6 @@ local function get_diagnostics(bufnr, opts, clamp)
   return diagnostics
 end
 
----@private
 local function set_list(loclist, opts)
   opts = opts or {}
   local open = vim.F.if_nil(opts.open, true)
@@ -474,7 +463,6 @@ local function set_list(loclist, opts)
   end
 end
 
----@private
 local function next_diagnostic(position, search_forward, bufnr, opts, namespace)
   position[1] = position[1] - 1
   bufnr = get_bufnr(bufnr)
@@ -525,7 +513,6 @@ local function next_diagnostic(position, search_forward, bufnr, opts, namespace)
   end
 end
 
----@private
 local function diagnostic_move_pos(opts, pos)
   opts = opts or {}
 
@@ -586,11 +573,13 @@ end
 ---@param opts table|nil When omitted or "nil", retrieve the current configuration. Otherwise, a
 ---                      configuration table with the following keys:
 ---       - underline: (default true) Use underline for diagnostics. Options:
----                    * severity: Only underline diagnostics matching the given severity
----                    |diagnostic-severity|
+---                    * severity: Only underline diagnostics matching the given
+---                    severity |diagnostic-severity|
 ---       - virtual_text: (default true) Use virtual text for diagnostics. If multiple diagnostics
 ---                       are set for a namespace, one prefix per diagnostic + the last diagnostic
----                       message are shown.
+---                       message are shown. In addition to the options listed below, the
+---                       "virt_text" options of |nvim_buf_set_extmark()| may also be used here
+---                       (e.g. "virt_text_pos" and "hl_mode").
 ---                       Options:
 ---                       * severity: Only show virtual text for diagnostics matching the given
 ---                       severity |diagnostic-severity|
@@ -600,7 +589,10 @@ end
 ---                                 means to always show the diagnostic source.
 ---                       * spacing: (number) Amount of empty spaces inserted at the beginning
 ---                                  of the virtual text.
----                       * prefix: (string) Prepend diagnostic message with prefix.
+---                       * prefix: (string or function) prepend diagnostic message with prefix.
+---                                 If a function, it must have the signature (diagnostic) -> string,
+---                                 where {diagnostic} is of type |diagnostic-structure|. This can be
+---                                 used to render diagnostic symbols or error codes.
 ---                       * suffix: (string or function) Append diagnostic message with suffix.
 ---                                 If a function, it must have the signature (diagnostic) ->
 ---                                 string, where {diagnostic} is of type |diagnostic-structure|.
@@ -617,8 +609,8 @@ end
 ---                         end
 ---                       </pre>
 ---       - signs: (default true) Use signs for diagnostics. Options:
----                * severity: Only show signs for diagnostics matching the given severity
----                |diagnostic-severity|
+---                * severity: Only show signs for diagnostics matching the given
+---                severity |diagnostic-severity|
 ---                * priority: (number, default 10) Base priority to use for signs. When
 ---                {severity_sort} is used, the priority of a sign is adjusted based on
 ---                its severity. Otherwise, all signs use the same priority.
@@ -744,17 +736,17 @@ function M.get_namespaces()
 end
 
 ---@class Diagnostic
----@field buffer integer
+---@field bufnr? integer
 ---@field lnum integer 0-indexed
----@field end_lnum nil|integer 0-indexed
+---@field end_lnum? integer 0-indexed
 ---@field col integer 0-indexed
----@field end_col nil|integer 0-indexed
----@field severity DiagnosticSeverity
+---@field end_col? integer 0-indexed
+---@field severity? DiagnosticSeverity
 ---@field message string
----@field source nil|string
----@field code nil|string
----@field _tags { deprecated: boolean, unnecessary: boolean}
----@field user_data nil|any arbitrary data plugins can add
+---@field source? string
+---@field code? string
+---@field _tags? { deprecated: boolean, unnecessary: boolean}
+---@field user_data? any arbitrary data plugins can add
 
 --- Get current diagnostics.
 ---
@@ -764,7 +756,7 @@ end
 ---                        - namespace: (number) Limit diagnostics to the given namespace.
 ---                        - lnum: (number) Limit diagnostics to the given line number.
 ---                        - severity: See |diagnostic-severity|.
----@return Diagnostic[] table A list of diagnostic items |diagnostic-structure|.
+---@return Diagnostic[] table A list of diagnostic items |diagnostic-structure|. Keys `bufnr`, `end_lnum`, `end_col`, and `severity` are guaranteed to be present.
 function M.get(bufnr, opts)
   vim.validate({
     bufnr = { bufnr, 'n', true },
@@ -840,13 +832,13 @@ end
 ---
 ---@param opts table|nil Configuration table with the following keys:
 ---         - namespace: (number) Only consider diagnostics from the given namespace.
----         - cursor_position: (cursor position) Cursor position as a (row, col) tuple. See
----                          |nvim_win_get_cursor()|. Defaults to the current cursor position.
+---         - cursor_position: (cursor position) Cursor position as a (row, col) tuple.
+---                          See |nvim_win_get_cursor()|. Defaults to the current cursor position.
 ---         - wrap: (boolean, default true) Whether to loop around file or not. Similar to 'wrapscan'.
 ---         - severity: See |diagnostic-severity|.
 ---         - float: (boolean or table, default true) If "true", call |vim.diagnostic.open_float()|
----                    after moving. If a table, pass the table as the {opts} parameter to
----                    |vim.diagnostic.open_float()|. Unless overridden, the float will show
+---                    after moving. If a table, pass the table as the {opts} parameter
+---                    to |vim.diagnostic.open_float()|. Unless overridden, the float will show
 ---                    diagnostics at the new cursor position (as if "cursor" were passed to
 ---                    the "scope" option).
 ---         - win_id: (number, default 0) Window ID
@@ -1029,8 +1021,11 @@ M.handlers.virtual_text = {
 
       if virt_texts then
         api.nvim_buf_set_extmark(bufnr, virt_text_ns, line, 0, {
-          hl_mode = 'combine',
+          hl_mode = opts.virtual_text.hl_mode or 'combine',
           virt_text = virt_texts,
+          virt_text_pos = opts.virtual_text.virt_text_pos,
+          virt_text_hide = opts.virtual_text.virt_text_hide,
+          virt_text_win_col = opts.virtual_text.virt_text_win_col,
         })
       end
     end
@@ -1066,8 +1061,15 @@ function M._get_virt_text_chunks(line_diags, opts)
   -- Create a little more space between virtual text and contents
   local virt_texts = { { string.rep(' ', spacing) } }
 
-  for i = 1, #line_diags - 1 do
-    table.insert(virt_texts, { prefix, virtual_text_highlight_map[line_diags[i].severity] })
+  for i = 1, #line_diags do
+    local resolved_prefix = prefix
+    if type(prefix) == 'function' then
+      resolved_prefix = prefix(line_diags[i]) or ''
+    end
+    table.insert(
+      virt_texts,
+      { resolved_prefix, virtual_text_highlight_map[line_diags[i].severity] }
+    )
   end
   local last = line_diags[#line_diags]
 
@@ -1078,7 +1080,7 @@ function M._get_virt_text_chunks(line_diags, opts)
       suffix = suffix(last) or ''
     end
     table.insert(virt_texts, {
-      string.format('%s %s%s', prefix, last.message:gsub('\r', ''):gsub('\n', '  '), suffix),
+      string.format(' %s%s', last.message:gsub('\r', ''):gsub('\n', '  '), suffix),
       virtual_text_highlight_map[last.severity],
     })
 
@@ -1227,8 +1229,8 @@ end
 
 --- Show diagnostics in a floating window.
 ---
----@param opts table|nil Configuration table with the same keys as
----            |vim.lsp.util.open_floating_preview()| in addition to the following:
+---@param opts table|nil Configuration table with the same keys
+---            as |vim.lsp.util.open_floating_preview()| in addition to the following:
 ---            - bufnr: (number) Buffer number to show diagnostics from.
 ---                     Defaults to the current buffer.
 ---            - namespace: (number) Limit diagnostics to the given namespace
@@ -1241,16 +1243,15 @@ end
 ---                   otherwise, a (row, col) tuple.
 ---            - severity_sort: (default false) Sort diagnostics by severity. Overrides the setting
 ---                             from |vim.diagnostic.config()|.
----            - severity: See |diagnostic-severity|. Overrides the setting from
----                        |vim.diagnostic.config()|.
+---            - severity: See |diagnostic-severity|. Overrides the setting
+---                        from |vim.diagnostic.config()|.
 ---            - header: (string or table) String to use as the header for the floating window. If a
 ---                      table, it is interpreted as a [text, hl_group] tuple. Overrides the setting
 ---                      from |vim.diagnostic.config()|.
 ---            - source: (boolean or string) Include the diagnostic source in the message.
 ---                      Use "if_many" to only show sources if there is more than one source of
 ---                      diagnostics in the buffer. Otherwise, any truthy value means to always show
----                      the diagnostic source. Overrides the setting from
----                      |vim.diagnostic.config()|.
+---                      the diagnostic source. Overrides the setting from |vim.diagnostic.config()|.
 ---            - format: (function) A function that takes a diagnostic as input and returns a
 ---                      string. The return value is the text used to display the diagnostic.
 ---                      Overrides the setting from |vim.diagnostic.config()|.
@@ -1706,8 +1707,7 @@ end
 
 --- Convert a list of quickfix items to a list of diagnostics.
 ---
----@param list table A list of quickfix items from |getqflist()| or
----            |getloclist()|.
+---@param list table[] List of quickfix items from |getqflist()| or |getloclist()|.
 ---@return Diagnostic[] array of |diagnostic-structure|
 function M.fromqflist(list)
   vim.validate({

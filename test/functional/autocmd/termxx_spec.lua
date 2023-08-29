@@ -1,5 +1,6 @@
 local luv = require('luv')
 local helpers = require('test.functional.helpers')(after_each)
+local thelpers = require('test.functional.terminal.helpers')
 
 local clear, command, nvim, testprg =
   helpers.clear, helpers.command, helpers.nvim, helpers.testprg
@@ -8,6 +9,7 @@ local eval, eq, neq, retry =
 local matches = helpers.matches
 local ok = helpers.ok
 local feed = helpers.feed
+local meths = helpers.meths
 local pcall_err = helpers.pcall_err
 local assert_alive = helpers.assert_alive
 local skip = helpers.skip
@@ -16,14 +18,14 @@ local is_os = helpers.is_os
 describe('autocmd TermClose', function()
   before_each(function()
     clear()
-    nvim('set_option', 'shell', testprg('shell-test'))
+    nvim('set_option_value', 'shell', testprg('shell-test'), {})
     command('set shellcmdflag=EXE shellredir= shellpipe= shellquote= shellxquote=')
   end)
 
 
   local function test_termclose_delete_own_buf()
     -- The terminal process needs to keep running so that TermClose isn't triggered immediately.
-    nvim('set_option', 'shell', string.format('"%s" INTERACT', testprg('shell-test')))
+    nvim('set_option_value', 'shell', string.format('"%s" INTERACT', testprg('shell-test')), {})
     command('autocmd TermClose * bdelete!')
     command('terminal')
     matches('^TermClose Autocommands for "%*": Vim%(bdelete%):E937: Attempt to delete a buffer that is in use: term://',
@@ -51,7 +53,7 @@ describe('autocmd TermClose', function()
 
   it('triggers when long-running terminal job gets stopped', function()
     skip(is_os('win'))
-    nvim('set_option', 'shell', is_os('win') and 'cmd.exe' or 'sh')
+    nvim('set_option_value', 'shell', is_os('win') and 'cmd.exe' or 'sh', {})
     command('autocmd TermClose * let g:test_termclose = 23')
     command('terminal')
     command('call jobstop(b:terminal_job_id)')
@@ -60,8 +62,8 @@ describe('autocmd TermClose', function()
 
   it('kills job trapping SIGTERM', function()
     skip(is_os('win'))
-    nvim('set_option', 'shell', 'sh')
-    nvim('set_option', 'shellcmdflag', '-c')
+    nvim('set_option_value', 'shell', 'sh', {})
+    nvim('set_option_value', 'shellcmdflag', '-c', {})
     command([[ let g:test_job = jobstart('trap "" TERM && echo 1 && sleep 60', { ]]
       .. [[ 'on_stdout': {-> execute('let g:test_job_started = 1')}, ]]
       .. [[ 'on_exit': {-> execute('let g:test_job_exited = 1')}}) ]])
@@ -80,8 +82,8 @@ describe('autocmd TermClose', function()
 
   it('kills PTY job trapping SIGHUP and SIGTERM', function()
     skip(is_os('win'))
-    nvim('set_option', 'shell', 'sh')
-    nvim('set_option', 'shellcmdflag', '-c')
+    nvim('set_option_value', 'shell', 'sh', {})
+    nvim('set_option_value', 'shellcmdflag', '-c', {})
     command([[ let g:test_job = jobstart('trap "" HUP TERM && echo 1 && sleep 60', { ]]
       .. [[ 'pty': 1,]]
       .. [[ 'on_stdout': {-> execute('let g:test_job_started = 1')}, ]]
@@ -101,12 +103,13 @@ describe('autocmd TermClose', function()
 
   it('reports the correct <abuf>', function()
     command('set hidden')
+    command('set shellcmdflag=EXE')
     command('autocmd TermClose * let g:abuf = expand("<abuf>")')
     command('edit foo')
     command('edit bar')
     eq(2, eval('bufnr("%")'))
 
-    command('terminal')
+    command('terminal ls')
     retry(nil, nil, function() eq(3, eval('bufnr("%")')) end)
 
     command('buffer 1')
@@ -161,4 +164,22 @@ it('autocmd TermEnter, TermLeave', function()
      {'TermLeave', 'n'},
     },
     eval('g:evs'))
+end)
+
+describe('autocmd TextChangedT', function()
+  clear()
+  local screen = thelpers.screen_setup()
+
+  it('works', function()
+    command('autocmd TextChangedT * ++once let g:called = 1')
+    thelpers.feed_data('a')
+    retry(nil, nil, function() eq(1, meths.get_var('called')) end)
+  end)
+
+  it('cannot delete terminal buffer', function()
+    command([[autocmd TextChangedT * call nvim_input('<CR>') | bwipe!]])
+    thelpers.feed_data('a')
+    screen:expect({any = 'E937: '})
+    matches('^E937: Attempt to delete a buffer that is in use: term://', meths.get_vvar('errmsg'))
+  end)
 end)

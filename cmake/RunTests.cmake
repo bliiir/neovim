@@ -63,9 +63,11 @@ if(NOT DEFINED ENV{TEST_TIMEOUT} OR "$ENV{TEST_TIMEOUT}" STREQUAL "")
 endif()
 
 set(ENV{SYSTEM_NAME} ${CMAKE_HOST_SYSTEM_NAME})  # used by test/helpers.lua.
-set(ENV{DEPS_PREFIX} ${DEPS_PREFIX})  # used by test/busted_runner.lua on windows
+set(ENV{DEPS_INSTALL_DIR} ${DEPS_INSTALL_DIR})  # used by test/busted_runner.lua
 
 execute_process(
+  # Note: because of "-ll" (low-level interpreter mode), some modules like
+  # _editor.lua are not loaded.
   COMMAND ${NVIM_PRG} -ll ${WORKING_DIR}/test/busted_runner.lua -v -o test.busted.outputHandlers.${BUSTED_OUTPUT_TYPE}
     --lazy --helper=${TEST_DIR}/${TEST_TYPE}/preload.lua
     --lpath=${BUILD_DIR}/?.lua
@@ -82,7 +84,7 @@ execute_process(
 file(GLOB RM_FILES ${BUILD_DIR}/Xtest_*)
 file(REMOVE_RECURSE ${RM_FILES})
 
-if(NOT res EQUAL 0)
+if(res)
   message(STATUS "Tests exited non-zero: ${res}")
   if("${err}" STREQUAL "")
     message(STATUS "No output to stderr.")

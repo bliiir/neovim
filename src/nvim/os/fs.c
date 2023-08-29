@@ -14,12 +14,26 @@
 #include <sys/stat.h>
 #include <uv.h>
 
+#ifdef MSWIN
+# include <shlobj.h>
+#endif
+
+#if defined(HAVE_ACL)
+# ifdef HAVE_SYS_ACL_H
+#  include <sys/acl.h>
+# endif
+# ifdef HAVE_SYS_ACCESS_H
+#  include <sys/access.h>
+# endif
+#endif
+
 #include "auto/config.h"
 #include "nvim/ascii.h"
 #include "nvim/gettext.h"
 #include "nvim/globals.h"
 #include "nvim/log.h"
 #include "nvim/macros.h"
+#include "nvim/main.h"
 #include "nvim/memory.h"
 #include "nvim/message.h"
 #include "nvim/option_defs.h"
@@ -46,44 +60,13 @@ struct iovec;
 
 #define RUN_UV_FS_FUNC(ret, func, ...) \
   do { \
-    bool did_try_to_free = false; \
-uv_call_start: {} \
     uv_fs_t req; \
-    fs_loop_lock(); \
-    ret = func(&fs_loop, &req, __VA_ARGS__); \
+    ret = func(NULL, &req, __VA_ARGS__); \
     uv_fs_req_cleanup(&req); \
-    fs_loop_unlock(); \
-    if (ret == UV_ENOMEM && !did_try_to_free) { \
-      try_to_free_memory(); \
-      did_try_to_free = true; \
-      goto uv_call_start; \
-    } \
   } while (0)
 
 // Many fs functions from libuv return that value on success.
 static const int kLibuvSuccess = 0;
-static uv_loop_t fs_loop;
-static uv_mutex_t fs_loop_mutex;
-
-// Initialize the fs module
-void fs_init(void)
-{
-  uv_loop_init(&fs_loop);
-  uv_mutex_init_recursive(&fs_loop_mutex);
-}
-
-/// TODO(bfredl): some of these operations should
-/// be possible to do the private libuv loop of the
-/// thread, instead of contending the global fs loop
-void fs_loop_lock(void)
-{
-  uv_mutex_lock(&fs_loop_mutex);
-}
-
-void fs_loop_unlock(void)
-{
-  uv_mutex_unlock(&fs_loop_mutex);
-}
 
 /// Changes the current directory to `path`.
 ///
@@ -122,12 +105,9 @@ bool os_isrealdir(const char *name)
   FUNC_ATTR_NONNULL_ALL
 {
   uv_fs_t request;
-  fs_loop_lock();
-  if (uv_fs_lstat(&fs_loop, &request, name, NULL) != kLibuvSuccess) {
-    fs_loop_unlock();
+  if (uv_fs_lstat(NULL, &request, name, NULL) != kLibuvSuccess) {
     return false;
   }
-  fs_loop_unlock();
   if (S_ISLNK(request.statbuf.st_mode)) {
     return false;
   }
@@ -372,7 +352,7 @@ static bool is_executable_in_path(const char *name, char **abspath)
   // is an executable file.
   char *p = path;
   bool rv = false;
-  for (;;) {
+  while (true) {
     char *e = xstrchrnul(p, ENV_SEPCHAR);
 
     // Combine the $PATH segment with `name`.
@@ -566,7 +546,6 @@ ptrdiff_t os_read(const int fd, bool *const ret_eof, char *const ret_buf, const 
     return 0;
   }
   size_t read_bytes = 0;
-  bool did_try_to_free = false;
   while (read_bytes != size) {
     assert(size >= read_bytes);
     const ptrdiff_t cur_read_bytes = read(fd, ret_buf + read_bytes,
@@ -580,10 +559,6 @@ ptrdiff_t os_read(const int fd, bool *const ret_eof, char *const ret_buf, const 
       if (non_blocking && error == UV_EAGAIN) {
         break;
       } else if (error == UV_EINTR || error == UV_EAGAIN) {
-        continue;
-      } else if (error == UV_ENOMEM && !did_try_to_free) {
-        try_to_free_memory();
-        did_try_to_free = true;
         continue;
       } else {
         return (ptrdiff_t)error;
@@ -618,7 +593,6 @@ ptrdiff_t os_readv(const int fd, bool *const ret_eof, struct iovec *iov, size_t 
 {
   *ret_eof = false;
   size_t read_bytes = 0;
-  bool did_try_to_free = false;
   size_t toread = 0;
   for (size_t i = 0; i < iov_size; i++) {
     // Overflow, trying to read too much data
@@ -649,10 +623,6 @@ ptrdiff_t os_readv(const int fd, bool *const ret_eof, struct iovec *iov, size_t 
       if (non_blocking && error == UV_EAGAIN) {
         break;
       } else if (error == UV_EINTR || error == UV_EAGAIN) {
-        continue;
-      } else if (error == UV_ENOMEM && !did_try_to_free) {
-        try_to_free_memory();
-        did_try_to_free = true;
         continue;
       } else {
         return (ptrdiff_t)error;
@@ -742,9 +712,7 @@ static int os_stat(const char *name, uv_stat_t *statbuf)
     return UV_EINVAL;
   }
   uv_fs_t request;
-  fs_loop_lock();
-  int result = uv_fs_stat(&fs_loop, &request, name, NULL);
-  fs_loop_unlock();
+  int result = uv_fs_stat(NULL, &request, name, NULL);
   if (result == kLibuvSuccess) {
     *statbuf = request.statbuf;
   }
@@ -775,15 +743,6 @@ int os_setperm(const char *const name, int perm)
   RUN_UV_FS_FUNC(r, uv_fs_chmod, name, perm, NULL);
   return (r == kLibuvSuccess ? OK : FAIL);
 }
-
-#if defined(HAVE_ACL)
-# ifdef HAVE_SYS_ACL_H
-#  include <sys/acl.h>
-# endif
-# ifdef HAVE_SYS_ACCESS_H
-#  include <sys/access.h>
-# endif
-#endif
 
 // Return a pointer to the ACL of file "fname" in allocated memory.
 // Return NULL if the ACL is not available for whatever reason.
@@ -937,10 +896,13 @@ int os_mkdir(const char *path, int32_t mode)
 ///                          the name of the directory which os_mkdir_recurse
 ///                          failed to create. I.e. it will contain dir or any
 ///                          of the higher level directories.
+/// @param[out]  created     Set to the full name of the first created directory.
+///                          It will be NULL until that happens.
 ///
 /// @return `0` for success, libuv error code for failure.
-int os_mkdir_recurse(const char *const dir, int32_t mode, char **const failed_dir)
-  FUNC_ATTR_NONNULL_ALL FUNC_ATTR_WARN_UNUSED_RESULT
+int os_mkdir_recurse(const char *const dir, int32_t mode, char **const failed_dir,
+                     char **const created)
+  FUNC_ATTR_NONNULL_ARG(1, 3) FUNC_ATTR_WARN_UNUSED_RESULT
 {
   // Get end of directory name in "dir".
   // We're done when it's "/" or "c:/".
@@ -975,6 +937,8 @@ int os_mkdir_recurse(const char *const dir, int32_t mode, char **const failed_di
     if ((ret = os_mkdir(curdir, mode)) != 0) {
       *failed_dir = curdir;
       return ret;
+    } else if (created != NULL && *created == NULL) {
+      *created = FullName_save(curdir, false);
     }
   }
   xfree(curdir);
@@ -1002,7 +966,7 @@ int os_file_mkdir(char *fname, int32_t mode)
     *tail = NUL;
     int r;
     char *failed_dir;
-    if (((r = os_mkdir_recurse(fname, mode, &failed_dir)) < 0)) {
+    if (((r = os_mkdir_recurse(fname, mode, &failed_dir, NULL)) < 0)) {
       semsg(_(e_mkdir), failed_dir, os_strerror(r));
       xfree(failed_dir);
     }
@@ -1014,18 +978,16 @@ int os_file_mkdir(char *fname, int32_t mode)
 
 /// Create a unique temporary directory.
 ///
-/// @param[in] template Template of the path to the directory with XXXXXX
-///                     which would be replaced by random chars.
+/// @param[in] templ Template of the path to the directory with XXXXXX
+///                  which would be replaced by random chars.
 /// @param[out] path Path to created directory for success, undefined for
 ///                  failure.
 /// @return `0` for success, non-zero for failure.
-int os_mkdtemp(const char *template, char *path)
+int os_mkdtemp(const char *templ, char *path)
   FUNC_ATTR_NONNULL_ALL
 {
   uv_fs_t request;
-  fs_loop_lock();
-  int result = uv_fs_mkdtemp(&fs_loop, &request, template, NULL);
-  fs_loop_unlock();
+  int result = uv_fs_mkdtemp(NULL, &request, templ, NULL);
   if (result == kLibuvSuccess) {
     xstrlcpy(path, request.path, TEMP_FILE_PATH_MAXLEN);
   }
@@ -1052,9 +1014,7 @@ int os_rmdir(const char *path)
 bool os_scandir(Directory *dir, const char *path)
   FUNC_ATTR_NONNULL_ALL
 {
-  fs_loop_lock();
-  int r = uv_fs_scandir(&fs_loop, &dir->request, path, 0, NULL);
-  fs_loop_unlock();
+  int r = uv_fs_scandir(NULL, &dir->request, path, 0, NULL);
   if (r < 0) {
     os_closedir(dir);
   }
@@ -1115,9 +1075,7 @@ bool os_fileinfo_link(const char *path, FileInfo *file_info)
     return false;
   }
   uv_fs_t request;
-  fs_loop_lock();
-  bool ok = uv_fs_lstat(&fs_loop, &request, path, NULL) == kLibuvSuccess;
-  fs_loop_unlock();
+  bool ok = uv_fs_lstat(NULL, &request, path, NULL) == kLibuvSuccess;
   if (ok) {
     file_info->stat = request.statbuf;
   }
@@ -1135,8 +1093,7 @@ bool os_fileinfo_fd(int file_descriptor, FileInfo *file_info)
 {
   uv_fs_t request;
   CLEAR_POINTER(file_info);
-  fs_loop_lock();
-  bool ok = uv_fs_fstat(&fs_loop,
+  bool ok = uv_fs_fstat(NULL,
                         &request,
                         file_descriptor,
                         NULL) == kLibuvSuccess;
@@ -1144,7 +1101,6 @@ bool os_fileinfo_fd(int file_descriptor, FileInfo *file_info)
     file_info->stat = request.statbuf;
   }
   uv_fs_req_cleanup(&request);
-  fs_loop_unlock();
   return ok;
 }
 
@@ -1261,8 +1217,7 @@ char *os_realpath(const char *name, char *buf)
   FUNC_ATTR_NONNULL_ARG(1)
 {
   uv_fs_t request;
-  fs_loop_lock();
-  int result = uv_fs_realpath(&fs_loop, &request, name, NULL);
+  int result = uv_fs_realpath(NULL, &request, name, NULL);
   if (result == kLibuvSuccess) {
     if (buf == NULL) {
       buf = xmallocz(MAXPATHL);
@@ -1270,13 +1225,10 @@ char *os_realpath(const char *name, char *buf)
     xstrlcpy(buf, request.ptr, MAXPATHL + 1);
   }
   uv_fs_req_cleanup(&request);
-  fs_loop_unlock();
   return result == kLibuvSuccess ? buf : NULL;
 }
 
 #ifdef MSWIN
-# include <shlobj.h>
-
 /// When "fname" is the name of a shortcut (*.lnk) resolve the file it points
 /// to and return that name in allocated memory.
 /// Otherwise NULL is returned.

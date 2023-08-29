@@ -18,12 +18,15 @@ vim.api.nvim_create_autocmd({ 'BufRead', 'BufNewFile', 'StdinReadPost' }, {
         end)
       end
     else
-      vim.api.nvim_buf_call(args.buf, function()
-        vim.api.nvim_cmd({ cmd = 'setf', args = { ft } }, {})
-      end)
+      -- on_detect is called before setting the filetype so that it can set any buffer local
+      -- variables that may be used the filetype's ftplugin
       if on_detect then
         on_detect(args.buf)
       end
+
+      vim.api.nvim_buf_call(args.buf, function()
+        vim.api.nvim_cmd({ cmd = 'setf', args = { ft } }, {})
+      end)
     end
   end,
 })
@@ -32,8 +35,7 @@ vim.api.nvim_create_autocmd({ 'BufRead', 'BufNewFile', 'StdinReadPost' }, {
 if not vim.g.did_load_ftdetect then
   vim.cmd([[
   augroup filetypedetect
-  runtime! ftdetect/*.vim
-  runtime! ftdetect/*.lua
+  runtime! ftdetect/*.{vim,lua}
   augroup END
   ]])
 end

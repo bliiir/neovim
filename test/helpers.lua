@@ -1,9 +1,7 @@
-require('test.compat')
 local shared = vim
 local assert = require('luassert')
 local busted = require('busted')
 local luv = require('luv')
-local relpath = require('pl.path').relpath
 local Paths = require('test.cmakeconfig.paths')
 
 assert:set_parameter('TableFormatLevel', 100)
@@ -21,6 +19,16 @@ local module = {
   REMOVE_THIS = {},
 }
 
+--- @param p string
+--- @return string
+local function relpath(p)
+  p = vim.fs.normalize(p)
+  local cwd = luv.cwd()
+  return p:gsub("^" .. cwd)
+end
+
+--- @param path string
+--- @return boolean
 function module.isdir(path)
   if not path then
     return false
@@ -32,6 +40,8 @@ function module.isdir(path)
   return stat.type == 'directory'
 end
 
+--- @param path string
+--- @return boolean
 function module.isfile(path)
   if not path then
     return false
@@ -43,6 +53,7 @@ function module.isfile(path)
   return stat.type == 'file'
 end
 
+--- @return string
 function module.argss_to_cmd(...)
   local cmd = ''
   for i = 1, select('#', ...) do
@@ -457,6 +468,7 @@ function module.check_cores(app, force) -- luacheck: ignore
   end
 end
 
+--- @return string?
 function module.repeated_read_cmd(...)
   for _ = 1, 10 do
     local stream = module.popen_r(...)
@@ -556,19 +568,24 @@ function module.concat_tables(...)
   return ret
 end
 
+--- @param str string
+--- @param leave_indent? integer
+--- @return string
 function module.dedent(str, leave_indent)
   -- find minimum common indent across lines
-  local indent = nil
+  local indent --- @type string?
   for line in str:gmatch('[^\n]+') do
     local line_indent = line:match('^%s+') or ''
     if indent == nil or #line_indent < #indent then
       indent = line_indent
     end
   end
-  if indent == nil or #indent == 0 then
+
+  if not indent or #indent == 0 then
     -- no minimum common indent
     return str
   end
+
   local left_indent = (' '):rep(leave_indent or 0)
   -- create a pattern for the indent
   indent = indent:gsub('%s', '[ \t]')

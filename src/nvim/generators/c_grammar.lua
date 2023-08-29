@@ -1,4 +1,4 @@
-local lpeg = require('lpeg')
+local lpeg = vim.lpeg
 
 -- lpeg grammar for building api metadata from a set of header files. It
 -- ignores comments and preprocessor commands and parses a very small subset
@@ -47,7 +47,8 @@ local c_proto = Ct(
   (fill * Cg((P('FUNC_API_NOEXPORT') * Cc(true)), 'noexport') ^ -1) *
   (fill * Cg((P('FUNC_API_REMOTE_ONLY') * Cc(true)), 'remote_only') ^ -1) *
   (fill * Cg((P('FUNC_API_LUA_ONLY') * Cc(true)), 'lua_only') ^ -1) *
-  (fill * Cg((P('FUNC_API_CHECK_TEXTLOCK') * Cc(true)), 'check_textlock') ^ -1) *
+  (fill * (Cg(P('FUNC_API_TEXTLOCK_ALLOW_CMDWIN') * Cc(true), 'textlock_allow_cmdwin') +
+           Cg(P('FUNC_API_TEXTLOCK') * Cc(true), 'textlock')) ^ -1) *
   (fill * Cg((P('FUNC_API_REMOTE_IMPL') * Cc(true)), 'remote_impl') ^ -1) *
   (fill * Cg((P('FUNC_API_COMPOSITOR_IMPL') * Cc(true)), 'compositor_impl') ^ -1) *
   (fill * Cg((P('FUNC_API_CLIENT_IMPL') * Cc(true)), 'client_impl') ^ -1) *
@@ -55,5 +56,11 @@ local c_proto = Ct(
   fill * P(';')
   )
 
-local grammar = Ct((c_proto + c_comment + c_preproc + ws) ^ 1)
+local c_field = Ct(Cg(c_id, 'type') * ws * Cg(c_id, 'name') * fill * P(';') * fill)
+local c_keyset = Ct(
+   P('typedef') * ws * P('struct') * fill * P('{') * fill *
+   Cg(Ct(c_field ^ 1), 'fields') *
+   P('}') * fill * P('Dict') * fill * P('(') * Cg(c_id, 'keyset_name') * fill * P(')') * P(';'))
+
+local grammar = Ct((c_proto + c_comment + c_preproc + ws + c_keyset) ^ 1)
 return {grammar=grammar, typed_container=typed_container}

@@ -1,7 +1,8 @@
 " These commands create the option window.
 "
-" Maintainer:	Bram Moolenaar <Bram@vim.org>
-" Last Change:	2022 Dec 16
+" Maintainer:	The Vim Project <https://github.com/vim/vim>
+" Last Change:	2023 Aug 10
+" Former Maintainer:	Bram Moolenaar <Bram@vim.org>
 
 " If there already is an option window, jump to that one.
 let buf = bufnr('option-window')
@@ -305,6 +306,9 @@ call <SID>Header(gettext("displaying text"))
 call <SID>AddOption("scroll", gettext("number of lines to scroll for CTRL-U and CTRL-D"))
 call append("$", "\t" .. s:local_to_window)
 call <SID>OptionL("scr")
+call <SID>AddOption("smoothscroll", gettext("scroll by screen line"))
+call append("$", "\t" .. s:local_to_window)
+call <SID>BinOptionL("sms")
 call <SID>AddOption("scrolloff", gettext("number of screen lines to show around the cursor"))
 call append("$", " \tset so=" . &so)
 call <SID>AddOption("wrap", gettext("long lines wrap"))

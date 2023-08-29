@@ -36,7 +36,7 @@
 
 void state_enter(VimState *s)
 {
-  for (;;) {
+  while (true) {
     int check_result = s->check ? s->check(s) : 1;
 
     if (!check_result) {
@@ -135,7 +135,7 @@ void state_handle_k_event(void)
 /// Return true if in the current mode we need to use virtual.
 bool virtual_active(void)
 {
-  unsigned int cur_ve_flags = get_ve_flags();
+  unsigned cur_ve_flags = get_ve_flags();
 
   // While an operator is being executed we return "virtual_op", because
   // VIsual_active has already been reset, thus we can't check for "block"
@@ -267,4 +267,51 @@ void may_trigger_modechanged(void)
   STRCPY(last_mode, curr_mode);
 
   restore_v_event(v_event, &save_v_event);
+}
+
+/// When true in a safe state when starting to wait for a character.
+static bool was_safe = false;
+
+/// Return whether currently it is safe, assuming it was safe before (high level
+/// state didn't change).
+static bool is_safe_now(void)
+{
+  return stuff_empty()
+         && typebuf.tb_len == 0
+         && !using_script()
+         && !global_busy
+         && !debug_mode;
+}
+
+/// Trigger SafeState if currently in s safe state, that is "safe" is TRUE and
+/// there is no typeahead.
+void may_trigger_safestate(bool safe)
+{
+  bool is_safe = safe && is_safe_now();
+
+  if (was_safe != is_safe) {
+    // Only log when the state changes, otherwise it happens at nearly
+    // every key stroke.
+    DLOG(is_safe ? "SafeState: Start triggering" : "SafeState: Stop triggering");
+  }
+  if (is_safe) {
+    apply_autocmds(EVENT_SAFESTATE, NULL, NULL, false, curbuf);
+  }
+  was_safe = is_safe;
+}
+
+/// Something changed which causes the state possibly to be unsafe, e.g. a
+/// character was typed.  It will remain unsafe until the next call to
+/// may_trigger_safestate().
+void state_no_longer_safe(const char *reason)
+{
+  if (was_safe && reason != NULL) {
+    DLOG("SafeState reset: %s", reason);
+  }
+  was_safe = false;
+}
+
+bool get_was_safe_state(void)
+{
+  return was_safe;
 }

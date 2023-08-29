@@ -105,7 +105,11 @@ describe('API/extmarks', function()
   it('validation', function()
     eq("Invalid 'end_col': expected Integer, got Array", pcall_err(set_extmark, ns, marks[2], 0, 0, { end_col = {}, end_row = 1 }))
     eq("Invalid 'end_row': expected Integer, got Array", pcall_err(set_extmark, ns, marks[2], 0, 0, { end_col = 1, end_row = {} }))
-    eq("Invalid 'id': expected positive Integer", pcall_err(set_extmark, ns, {}, 0, 0, { end_col = 1, end_row = 1 }))
+    eq("Invalid 'virt_text_pos': expected String, got Integer", pcall_err(set_extmark, ns, marks[2], 0, 0, { virt_text_pos = 0 }))
+    eq("Invalid 'virt_text_pos': 'foo'", pcall_err(set_extmark, ns, marks[2], 0, 0, { virt_text_pos = 'foo' }))
+    eq("Invalid 'hl_mode': expected String, got Integer", pcall_err(set_extmark, ns, marks[2], 0, 0, { hl_mode = 0 }))
+    eq("Invalid 'hl_mode': 'foo'", pcall_err(set_extmark, ns, marks[2], 0, 0, { hl_mode = 'foo' }))
+    eq("Invalid 'id': expected Integer, got Array", pcall_err(set_extmark, ns, {}, 0, 0, { end_col = 1, end_row = 1 }))
     eq("Invalid mark position: expected 2 Integer items", pcall_err(get_extmarks, ns, {}, {-1, -1}))
     eq("Invalid mark position: expected mark id Integer or 2-item Array", pcall_err(get_extmarks, ns, true, {-1, -1}))
     -- No memory leak with virt_text, virt_lines, sign_text
@@ -1401,7 +1405,7 @@ describe('API/extmarks', function()
 
   it('in read-only buffer', function()
     command("view! runtime/doc/help.txt")
-    eq(true, curbufmeths.get_option('ro'))
+    eq(true, meths.get_option_value('ro', {}))
     local id = set_extmark(ns, 0, 0, 2)
     eq({{id, 0, 2}}, get_extmarks(ns,0, -1))
   end)
@@ -1474,7 +1478,7 @@ describe('API/extmarks', function()
   it('in prompt buffer', function()
     feed('dd')
     local id = set_extmark(ns, marks[1], 0, 0, {})
-    curbufmeths.set_option('buftype', 'prompt')
+    meths.set_option_value('buftype', 'prompt', {})
     feed('i<esc>')
     eq({{id, 0, 2}}, get_extmarks(ns, 0, -1))
   end)
@@ -1541,6 +1545,12 @@ describe('API/extmarks', function()
       virt_text_pos = "win_col",
       virt_text_win_col = 1,
     } }, get_extmark_by_id(ns, marks[2], { details = true }))
+    set_extmark(ns, marks[3], 0, 0, { cursorline_hl_group = "Statement" })
+    eq({0, 0, {
+      ns_id = 1,
+      cursorline_hl_group = "Statement",
+      right_gravity = true,
+    } }, get_extmark_by_id(ns, marks[3], { details = true }))
   end)
 
   it('can get marks from anonymous namespaces', function()

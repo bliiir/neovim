@@ -2,6 +2,14 @@
 " Use a different file name for each run.
 let s:sequence = 1
 
+func CheckDefFailure(lines, error, lnum = -3)
+  return
+endfunc
+
+func CheckDefExecFailure(lines, error, lnum = -3)
+  return
+endfunc
+
 func CheckScriptFailure(lines, error, lnum = -3)
   if get(a:lines, 0, '') ==# 'vim9script'
     return
@@ -32,6 +40,14 @@ func CheckScriptSuccess(lines)
     call chdir(cwd)
     call delete(fname)
   endtry
+endfunc
+
+func CheckDefAndScriptSuccess(lines)
+  return
+endfunc
+
+func CheckDefAndScriptFailure(lines, error, lnum = -3)
+  return
 endfunc
 
 func CheckDefExecAndScriptFailure(lines, error, lnum = -3)
@@ -72,7 +88,7 @@ endfunc
 " Execute "lines" in a legacy function, translated as in
 " CheckLegacyAndVim9Success()
 func CheckTransLegacySuccess(lines)
-  let legacylines = a:lines->deepcopy()->map({_, v ->
+  let legacylines = a:lines->mapnew({_, v ->
                               \ v->substitute('\<VAR\>', 'let', 'g')
                               \  ->substitute('\<LET\>', 'let', 'g')
                               \  ->substitute('\<LSTART\>', '{', 'g')
@@ -83,6 +99,14 @@ func CheckTransLegacySuccess(lines)
                               \  ->substitute('#"', ' "', 'g')
                               \ })
   call CheckLegacySuccess(legacylines)
+endfunc
+
+func CheckTransDefSuccess(lines)
+  return
+endfunc
+
+func CheckTransVim9Success(lines)
+  return
 endfunc
 
 " Execute "lines" in a legacy function
@@ -107,7 +131,7 @@ func CheckLegacyAndVim9Failure(lines, error)
     let legacyError = a:error[0]
   endif
 
-  let legacylines = a:lines->deepcopy()->map({_, v ->
+  let legacylines = a:lines->mapnew({_, v ->
                               \ v->substitute('\<VAR\>', 'let', 'g')
                               \  ->substitute('\<LET\>', 'let', 'g')
                               \  ->substitute('#"', ' "', 'g')

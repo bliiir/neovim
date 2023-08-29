@@ -87,7 +87,7 @@ static void api_parse_enter(mpack_parser_t *parser, mpack_node_t *node)
     *result = NIL;
     break;
   case MPACK_TOKEN_BOOLEAN:
-    *result = BOOL(mpack_unpack_boolean(node->tok));
+    *result = BOOLEAN_OBJ(mpack_unpack_boolean(node->tok));
     break;
   case MPACK_TOKEN_SINT:
     *result = INTEGER_OBJ(mpack_unpack_sint(node->tok));
@@ -179,7 +179,8 @@ static void api_parse_enter(mpack_parser_t *parser, mpack_node_t *node)
 }
 
 static void api_parse_exit(mpack_parser_t *parser, mpack_node_t *node)
-{}
+{
+}
 
 void unpacker_init(Unpacker *p)
 {
@@ -440,7 +441,7 @@ redo:
   case 14:
     NEXT_TYPE(tok, MPACK_TOKEN_ARRAY);
     int eventarrsize = (int)tok.length;
-    if (eventarrsize != 4) {
+    if (eventarrsize != 5) {
       p->state = -1;
       return false;
     }
@@ -508,11 +509,16 @@ redo:
     }
 
     g->icell++;
-    p->read_ptr = data;
-    p->read_size = size;
     if (g->icell == g->ncells) {
+      NEXT_TYPE(tok, MPACK_TOKEN_BOOLEAN);
+      g->wrap = mpack_unpack_boolean(tok);
+      p->read_ptr = data;
+      p->read_size = size;
       return true;
     }
+
+    p->read_ptr = data;
+    p->read_size = size;
     goto redo;
 
   case 12:

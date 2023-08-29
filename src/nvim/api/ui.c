@@ -73,6 +73,11 @@ static void mpack_uint(char **buf, uint32_t val)
   }
 }
 
+static void mpack_bool(char **buf, bool val)
+{
+  mpack_w(buf, 0xc2 | val);
+}
+
 static void mpack_array(char **buf, uint32_t len)
 {
   if (len < 0x10) {
@@ -111,7 +116,7 @@ void remote_ui_disconnect(uint64_t channel_id)
   }
   UIData *data = ui->data;
   kv_destroy(data->call_buf);
-  pmap_del(uint64_t)(&connected_uis, channel_id);
+  pmap_del(uint64_t)(&connected_uis, channel_id, NULL);
   ui_detach_impl(ui, channel_id);
 
   // Destroy `ui`.
@@ -210,6 +215,8 @@ void nvim_ui_attach(uint64_t channel_id, Integer width, Integer height, Dictiona
 
   pmap_put(uint64_t)(&connected_uis, channel_id, ui);
   ui_attach_impl(ui, channel_id);
+
+  may_trigger_vim_suspend_resume(false);
 }
 
 /// @deprecated
@@ -230,6 +237,10 @@ void nvim_ui_set_focus(uint64_t channel_id, Boolean gained, Error *error)
     api_set_error(error, kErrorTypeException,
                   "UI not attached to channel: %" PRId64, channel_id);
     return;
+  }
+
+  if (gained) {
+    may_trigger_vim_suspend_resume(false);
   }
 
   do_autocmd_focusgained((bool)gained);
@@ -254,7 +265,8 @@ void nvim_ui_detach(uint64_t channel_id, Error *err)
 
 // TODO(bfredl): use me to detach a specific ui from the server
 void remote_ui_stop(UI *ui)
-{}
+{
+}
 
 void nvim_ui_try_resize(uint64_t channel_id, Integer width, Integer height, Error *err)
   FUNC_API_SINCE(1) FUNC_API_REMOTE_ONLY
@@ -794,7 +806,7 @@ void remote_ui_put(UI *ui, const char *cell)
   UIData *data = ui->data;
   data->client_col++;
   Array args = data->call_buf;
-  ADD_C(args, STRING_OBJ(cstr_as_string((char *)cell)));
+  ADD_C(args, CSTR_AS_OBJ((char *)cell));
   push_call(ui, "put", args);
 }
 
@@ -808,7 +820,7 @@ void remote_ui_raw_line(UI *ui, Integer grid, Integer row, Integer startcol, Int
     data->ncalls++;
 
     char **buf = &data->buf_wptr;
-    mpack_array(buf, 4);
+    mpack_array(buf, 5);
     mpack_uint(buf, (uint32_t)grid);
     mpack_uint(buf, (uint32_t)row);
     mpack_uint(buf, (uint32_t)startcol);
@@ -822,17 +834,20 @@ void remote_ui_raw_line(UI *ui, Integer grid, Integer row, Integer startcol, Int
       repeat++;
       if (i == ncells - 1 || attrs[i] != attrs[i + 1]
           || strcmp(chunk[i], chunk[i + 1]) != 0) {
-        if (UI_BUF_SIZE - BUF_POS(data) < 2 * (1 + 2 + sizeof(schar_T) + 5 + 5)) {
+        if (UI_BUF_SIZE - BUF_POS(data) < 2 * (1 + 2 + sizeof(schar_T) + 5 + 5) + 1) {
           // close to overflowing the redraw buffer. finish this event,
           // flush, and start a new "grid_line" event at the current position.
           // For simplicity leave place for the final "clear" element
           // as well, hence the factor of 2 in the check.
           mpack_w2(&lenpos, nelem);
+
+          // We only ever set the wrap field on the final "grid_line" event for the line.
+          mpack_bool(buf, false);
           remote_ui_flush_buf(ui);
 
           prepare_call(ui, "grid_line");
           data->ncalls++;
-          mpack_array(buf, 4);
+          mpack_array(buf, 5);
           mpack_uint(buf, (uint32_t)grid);
           mpack_uint(buf, (uint32_t)row);
           mpack_uint(buf, (uint32_t)startcol + (uint32_t)i - repeat + 1);
@@ -843,7 +858,7 @@ void remote_ui_raw_line(UI *ui, Integer grid, Integer row, Integer startcol, Int
         uint32_t csize = (repeat > 1) ? 3 : ((attrs[i] != last_hl) ? 2 : 1);
         nelem++;
         mpack_array(buf, csize);
-        mpack_str(buf, (const char *)chunk[i]);
+        mpack_str(buf, chunk[i]);
         if (csize >= 2) {
           mpack_uint(buf, (uint32_t)attrs[i]);
           if (csize >= 3) {
@@ -864,16 +879,17 @@ void remote_ui_raw_line(UI *ui, Integer grid, Integer row, Integer startcol, Int
       mpack_uint(buf, (uint32_t)(clearcol - endcol));
     }
     mpack_w2(&lenpos, nelem);
+    mpack_bool(buf, flags & kLineFlagWrap);
 
     if (data->ncells_pending > 500) {
-      // pass of cells to UI to let it start processing them
+      // pass off cells to UI to let it start processing them
       remote_ui_flush_buf(ui);
     }
   } else {
     for (int i = 0; i < endcol - startcol; i++) {
       remote_ui_cursor_goto(ui, row, startcol + i);
       remote_ui_highlight_set(ui, attrs[i]);
-      remote_ui_put(ui, (const char *)chunk[i]);
+      remote_ui_put(ui, chunk[i]);
       if (utf_ambiguous_width(utf_ptr2char((char *)chunk[i]))) {
         data->client_col = -1;  // force cursor update
       }

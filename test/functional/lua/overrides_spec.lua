@@ -15,8 +15,6 @@ local exec_lua = helpers.exec_lua
 local pcall_err = helpers.pcall_err
 local is_os = helpers.is_os
 
-local screen
-
 local fname = 'Xtest-functional-lua-overrides-luafile'
 
 before_each(clear)
@@ -100,7 +98,7 @@ describe('print', function()
       pcall_err(command, 'lua bad_custom_error()'))
   end)
   it('prints strings with NULs and NLs correctly', function()
-    meths.set_option('more', true)
+    meths.set_option_value('more', true, {})
     eq('abc ^@ def\nghi^@^@^@jkl\nTEST\n\n\nT\n',
        exec_capture([[lua print("abc \0 def\nghi\0\0\0jkl\nTEST\n\n\nT\n")]]))
     eq('abc ^@ def\nghi^@^@^@jkl\nTEST\n\n\nT^@',
@@ -119,7 +117,7 @@ describe('print', function()
     exec_lua([[
       local cmd = ...
       function test()
-        local timer = vim.loop.new_timer()
+        local timer = vim.uv.new_timer()
         local done = false
         timer:start(10, 0, function()
           print("very fast")
@@ -130,7 +128,7 @@ describe('print', function()
         -- loop until we know for sure the callback has been executed
         while not done do
           os.execute(cmd)
-          vim.loop.run("nowait") -- fake os_breakcheck()
+          vim.uv.run("nowait") -- fake os_breakcheck()
         end
         print("very slow")
         vim.api.nvim_command("sleep 1m") -- force deferred event processing
@@ -138,9 +136,44 @@ describe('print', function()
     ]], (is_os('win') and "timeout 1") or "sleep 0.1")
     eq('very slow\nvery fast', exec_capture('lua test()'))
   end)
+
+  it('blank line in message works', function()
+    local screen = Screen.new(40, 8)
+    screen:attach()
+    screen:set_default_attr_ids({
+      [0] = {bold = true, foreground=Screen.colors.Blue},
+      [1] = {bold = true, foreground = Screen.colors.SeaGreen},
+      [2] = {bold = true, reverse = true},
+    })
+    feed([[:lua print('\na')<CR>]])
+    screen:expect{grid=[[
+                                              |
+      {0:~                                       }|
+      {0:~                                       }|
+      {0:~                                       }|
+      {2:                                        }|
+                                              |
+      a                                       |
+      {1:Press ENTER or type command to continue}^ |
+    ]]}
+    feed('<CR>')
+    feed([[:lua print('b\n\nc')<CR>]])
+    screen:expect{grid=[[
+                                              |
+      {0:~                                       }|
+      {0:~                                       }|
+      {2:                                        }|
+      b                                       |
+                                              |
+      c                                       |
+      {1:Press ENTER or type command to continue}^ |
+    ]]}
+  end)
 end)
 
 describe('debug.debug', function()
+  local screen
+
   before_each(function()
     screen = Screen.new()
     screen:attach()

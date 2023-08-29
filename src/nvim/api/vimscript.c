@@ -38,7 +38,7 @@
 /// Unlike |nvim_command()| this function supports heredocs, script-scope (s:),
 /// etc.
 ///
-/// On execution error: fails with VimL error, updates v:errmsg.
+/// On execution error: fails with Vimscript error, updates v:errmsg.
 ///
 /// @see |execute()|
 /// @see |nvim_command()|
@@ -61,7 +61,7 @@ Dictionary nvim_exec2(uint64_t channel_id, String src, Dict(exec_opts) *opts, Er
     return result;
   }
 
-  if (HAS_KEY(opts->output) && api_object_to_bool(opts->output, "opts.output", false, err)) {
+  if (opts->output) {
     PUT(result, "output", STRING_OBJ(output));
   }
 
@@ -70,19 +70,17 @@ Dictionary nvim_exec2(uint64_t channel_id, String src, Dict(exec_opts) *opts, Er
 
 String exec_impl(uint64_t channel_id, String src, Dict(exec_opts) *opts, Error *err)
 {
-  Boolean output = api_object_to_bool(opts->output, "opts.output", false, err);
-
   const int save_msg_silent = msg_silent;
   garray_T *const save_capture_ga = capture_ga;
   const int save_msg_col = msg_col;
   garray_T capture_local;
-  if (output) {
+  if (opts->output) {
     ga_init(&capture_local, 1, 80);
     capture_ga = &capture_local;
   }
 
   try_start();
-  if (output) {
+  if (opts->output) {
     msg_silent++;
     msg_col = 0;  // prevent leading spaces
   }
@@ -90,7 +88,7 @@ String exec_impl(uint64_t channel_id, String src, Dict(exec_opts) *opts, Error *
   const sctx_T save_current_sctx = api_set_sctx(channel_id);
 
   do_source_str(src.data, "nvim_exec2()");
-  if (output) {
+  if (opts->output) {
     capture_ga = save_capture_ga;
     msg_silent = save_msg_silent;
     // Put msg_col back where it was, since nothing should have been written.
@@ -104,7 +102,7 @@ String exec_impl(uint64_t channel_id, String src, Dict(exec_opts) *opts, Error *
     goto theend;
   }
 
-  if (output && capture_local.ga_len > 1) {
+  if (opts->output && capture_local.ga_len > 1) {
     String s = (String){
       .data = capture_local.ga_data,
       .size = (size_t)capture_local.ga_len,
@@ -118,7 +116,7 @@ String exec_impl(uint64_t channel_id, String src, Dict(exec_opts) *opts, Error *
     return s;  // Caller will free the memory.
   }
 theend:
-  if (output) {
+  if (opts->output) {
     ga_clear(&capture_local);
   }
   return (String)STRING_INIT;
@@ -126,7 +124,7 @@ theend:
 
 /// Executes an Ex command.
 ///
-/// On execution error: fails with VimL error, updates v:errmsg.
+/// On execution error: fails with Vimscript error, updates v:errmsg.
 ///
 /// Prefer using |nvim_cmd()| or |nvim_exec2()| over this. To evaluate multiple lines of Vim script
 /// or an Ex command directly, use |nvim_exec2()|. To construct an Ex command using a structured
@@ -143,12 +141,12 @@ void nvim_command(String command, Error *err)
   try_end(err);
 }
 
-/// Evaluates a VimL |expression|.
+/// Evaluates a Vimscript |expression|.
 /// Dictionaries and Lists are recursively expanded.
 ///
-/// On execution error: fails with VimL error, updates v:errmsg.
+/// On execution error: fails with Vimscript error, updates v:errmsg.
 ///
-/// @param expr     VimL expression string
+/// @param expr     Vimscript expression string
 /// @param[out] err Error details, if any
 /// @return         Evaluation result or expanded object
 Object nvim_eval(String expr, Error *err)
@@ -172,7 +170,8 @@ Object nvim_eval(String expr, Error *err)
   int ok;
 
   TRY_WRAP(err, {
-    ok = eval0(expr.data, &rettv, NULL, true);
+    ok = eval0(expr.data, &rettv, NULL, &EVALARG_EVALUATE);
+    clear_evalarg(&EVALARG_EVALUATE, NULL);
   });
 
   if (!ERROR_SET(err)) {
@@ -191,7 +190,7 @@ Object nvim_eval(String expr, Error *err)
   return rv;
 }
 
-/// Calls a VimL function.
+/// Calls a Vimscript function.
 ///
 /// @param fn Function name
 /// @param args Function arguments
@@ -257,9 +256,9 @@ free_vim_args:
   return rv;
 }
 
-/// Calls a VimL function with the given arguments.
+/// Calls a Vimscript function with the given arguments.
 ///
-/// On execution error: fails with VimL error, updates v:errmsg.
+/// On execution error: fails with Vimscript error, updates v:errmsg.
 ///
 /// @param fn       Function to call
 /// @param args     Function arguments packed in an Array
@@ -271,12 +270,12 @@ Object nvim_call_function(String fn, Array args, Error *err)
   return _call_function(fn, args, NULL, err);
 }
 
-/// Calls a VimL |Dictionary-function| with the given arguments.
+/// Calls a Vimscript |Dictionary-function| with the given arguments.
 ///
-/// On execution error: fails with VimL error, updates v:errmsg.
+/// On execution error: fails with Vimscript error, updates v:errmsg.
 ///
-/// @param dict Dictionary, or String evaluating to a VimL |self| dict
-/// @param fn Name of the function defined on the VimL dict
+/// @param dict Dictionary, or String evaluating to a Vimscript |self| dict
+/// @param fn Name of the function defined on the Vimscript dict
 /// @param args Function arguments packed in an Array
 /// @param[out] err Error details, if any
 /// @return Result of the function call
@@ -290,10 +289,11 @@ Object nvim_call_dict_function(Object dict, String fn, Array args, Error *err)
   switch (dict.type) {
   case kObjectTypeString:
     try_start();
-    if (eval0(dict.data.string.data, &rettv, NULL, true) == FAIL) {
+    if (eval0(dict.data.string.data, &rettv, NULL, &EVALARG_EVALUATE) == FAIL) {
       api_set_error(err, kErrorTypeException,
                     "Failed to evaluate dict expression");
     }
+    clear_evalarg(&EVALARG_EVALUATE, NULL);
     if (try_end(err)) {
       return rv;
     }
@@ -361,7 +361,7 @@ typedef struct {
 typedef kvec_withinit_t(ExprASTConvStackItem, 16) ExprASTConvStack;
 /// @endcond
 
-/// Parse a VimL expression.
+/// Parse a Vimscript expression.
 ///
 /// @param[in]  expr  Expression to parse. Always treated as a single line.
 /// @param[in]  flags Flags:
@@ -400,7 +400,7 @@ typedef kvec_withinit_t(ExprASTConvStackItem, 16) ExprASTConvStack;
 ///                    stringified without "kExprNode" prefix.
 ///          - "start": a pair [line, column] describing where node is "started"
 ///                     where "line" is always 0 (will not be 0 if you will be
-///                     using nvim_parse_viml() on e.g. ":let", but that is not
+///                     using this API on e.g. ":let", but that is not
 ///                     present yet). Both elements are Integers.
 ///          - "len": “length” of the node. This and "start" are there for
 ///                   debugging purposes primary (debugging parser and providing
@@ -500,7 +500,7 @@ Dictionary nvim_parse_expression(String expr, String flags, Boolean highlight, E
     };
     err_dict.items[0] = (KeyValuePair) {
       .key = STATIC_CSTR_TO_STRING("message"),
-      .value = STRING_OBJ(cstr_to_string(east.err.msg)),
+      .value = CSTR_TO_OBJ(east.err.msg),
     };
     if (east.err.arg == NULL) {
       err_dict.items[1] = (KeyValuePair) {
@@ -537,7 +537,7 @@ Dictionary nvim_parse_expression(String expr, String flags, Boolean highlight, E
       chunk_arr.items[0] = INTEGER_OBJ((Integer)chunk.start.line);
       chunk_arr.items[1] = INTEGER_OBJ((Integer)chunk.start.col);
       chunk_arr.items[2] = INTEGER_OBJ((Integer)chunk.end_col);
-      chunk_arr.items[3] = STRING_OBJ(cstr_to_string(chunk.group));
+      chunk_arr.items[3] = CSTR_TO_OBJ(chunk.group);
       hl.items[i] = ARRAY_OBJ(chunk_arr);
     }
     ret.items[ret.size++] = (KeyValuePair) {
@@ -614,7 +614,7 @@ Dictionary nvim_parse_expression(String expr, String flags, Boolean highlight, E
         kv_drop(ast_conv_stack, 1);
         ret_node->items[ret_node->size++] = (KeyValuePair) {
           .key = STATIC_CSTR_TO_STRING("type"),
-          .value = STRING_OBJ(cstr_to_string(east_node_type_tab[node->type])),
+          .value = CSTR_TO_OBJ(east_node_type_tab[node->type]),
         };
         Array start_array = {
           .items = xmalloc(2 * sizeof(start_array.items[0])),
@@ -699,11 +699,11 @@ Dictionary nvim_parse_expression(String expr, String flags, Boolean highlight, E
         case kExprNodeComparison:
           ret_node->items[ret_node->size++] = (KeyValuePair) {
             .key = STATIC_CSTR_TO_STRING("cmp_type"),
-            .value = STRING_OBJ(cstr_to_string(eltkn_cmp_type_tab[node->data.cmp.type])),
+            .value = CSTR_TO_OBJ(eltkn_cmp_type_tab[node->data.cmp.type]),
           };
           ret_node->items[ret_node->size++] = (KeyValuePair) {
             .key = STATIC_CSTR_TO_STRING("ccs_strategy"),
-            .value = STRING_OBJ(cstr_to_string(ccs_tab[node->data.cmp.ccs])),
+            .value = CSTR_TO_OBJ(ccs_tab[node->data.cmp.ccs]),
           };
           ret_node->items[ret_node->size++] = (KeyValuePair) {
             .key = STATIC_CSTR_TO_STRING("invert"),

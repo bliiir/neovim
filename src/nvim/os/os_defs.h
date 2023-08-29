@@ -7,6 +7,12 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
+// Note: Some systems need both string.h and strings.h (Savage).
+#include <string.h>
+#ifdef HAVE_STRINGS_H
+# include <strings.h>
+#endif
+
 #ifdef MSWIN
 # include "nvim/os/win_defs.h"
 #else
@@ -36,12 +42,6 @@
 // Command-processing buffer. Use large buffers for all platforms.
 #define CMDBUFFSIZE 1024
 
-// Note: Some systems need both string.h and strings.h (Savage).
-#include <string.h>
-#ifdef HAVE_STRINGS_H
-# include <strings.h>
-#endif
-
 /// Converts libuv error (negative int) to error description string.
 #define os_strerror uv_strerror
 
@@ -57,49 +57,49 @@
 // stat macros
 #ifndef S_ISDIR
 # ifdef S_IFDIR
-#  define S_ISDIR(m)    (((m) & S_IFMT) == S_IFDIR)
+#  define S_ISDIR(m)    (((m)& S_IFMT) == S_IFDIR)
 # else
 #  define S_ISDIR(m)    0
 # endif
 #endif
 #ifndef S_ISREG
 # ifdef S_IFREG
-#  define S_ISREG(m)    (((m) & S_IFMT) == S_IFREG)
+#  define S_ISREG(m)    (((m)& S_IFMT) == S_IFREG)
 # else
 #  define S_ISREG(m)    0
 # endif
 #endif
 #ifndef S_ISBLK
 # ifdef S_IFBLK
-#  define S_ISBLK(m)    (((m) & S_IFMT) == S_IFBLK)
+#  define S_ISBLK(m)    (((m)& S_IFMT) == S_IFBLK)
 # else
 #  define S_ISBLK(m)    0
 # endif
 #endif
 #ifndef S_ISSOCK
 # ifdef S_IFSOCK
-#  define S_ISSOCK(m)   (((m) & S_IFMT) == S_IFSOCK)
+#  define S_ISSOCK(m)   (((m)& S_IFMT) == S_IFSOCK)
 # else
 #  define S_ISSOCK(m)   0
 # endif
 #endif
 #ifndef S_ISFIFO
 # ifdef S_IFIFO
-#  define S_ISFIFO(m)   (((m) & S_IFMT) == S_IFIFO)
+#  define S_ISFIFO(m)   (((m)& S_IFMT) == S_IFIFO)
 # else
 #  define S_ISFIFO(m)   0
 # endif
 #endif
 #ifndef S_ISCHR
 # ifdef S_IFCHR
-#  define S_ISCHR(m)    (((m) & S_IFMT) == S_IFCHR)
+#  define S_ISCHR(m)    (((m)& S_IFMT) == S_IFCHR)
 # else
 #  define S_ISCHR(m)    0
 # endif
 #endif
 #ifndef S_ISLNK
 # ifdef S_IFLNK
-#  define S_ISLNK(m)    (((m) & S_IFMT) == S_IFLNK)
+#  define S_ISLNK(m)    (((m)& S_IFMT) == S_IFLNK)
 # else
 #  define S_ISLNK(m)    0
 # endif

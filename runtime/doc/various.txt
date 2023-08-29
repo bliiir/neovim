@@ -88,17 +88,23 @@ g8			Print the hex values of the bytes used in the
 
 							*8g8*
 8g8			Find an illegal UTF-8 byte sequence at or after the
-			cursor.  This works in two situations:
-			1. when 'encoding' is any 8-bit encoding
-			2. when 'encoding' is "utf-8" and 'fileencoding' is
-			   any 8-bit encoding
-			Thus it can be used when editing a file that was
-			supposed to be UTF-8 but was read as if it is an 8-bit
-			encoding because it contains illegal bytes.
+			cursor.
+			Can be used when editing a file that was supposed to
+			be UTF-8 but was read as if it is an 8-bit encoding
+			because it contains illegal bytes.
 			Does not wrap around the end of the file.
 			Note that when the cursor is on an illegal byte or the
 			cursor is halfway through a multibyte character the
 			command won't move the cursor.
+
+							*gx*
+gx			Opens the current filepath or URL (decided by
+			|<cfile>|, 'isfname') at cursor using the system
+			default handler, by calling |vim.ui.open()|.
+
+							*v_gx*
+{Visual}gx		Opens the selected text using the system default
+			handler, by calling |vim.ui.open()|.
 
 						*:p* *:pr* *:print* *E749*
 :[range]p[rint] [flags]
@@ -174,8 +180,8 @@ g8			Print the hex values of the bytes used in the
 			Like ":z" or ":z!", but number the lines.
 
 							*:=*
-:=			Without arg: Print the last line number.
-			with args: equivalent to `:lua ={expr}`. see |:lua|
+:= [args]		Without [args]: prints the last line number.
+			With [args]: equivalent to `:lua ={expr}`. see |:lua|
 
 :{range}=		Prints the last line number in {range}.  For example,
 			this prints the current line number: >
@@ -242,6 +248,10 @@ g8			Print the hex values of the bytes used in the
 
 			Fails if changes have been made to the current buffer,
 			unless 'hidden' is set.
+
+			If {cmd} is omitted, and the 'shell' job exits with no
+			error, the buffer is closed automatically
+			|default-autocmds|.
 
 			To enter |Terminal-mode| automatically: >
 			      autocmd TermOpen * startinsert
@@ -489,6 +499,9 @@ user command or autocommand, the script in which it was defined is reported.
 <			- When 'keywordprg' is equal to "man -s", a [count]
 			  before "K" is inserted after the "-s".  If there is
 			  no count, the "-s" is removed.
+							       *K-lsp-default*
+			- The Nvim |LSP| client sets K to show LSP "hover"
+			  feature. |lsp-defaults|
 
 							*v_K*
 {Visual}K		Like "K", but use the visually highlighted text for

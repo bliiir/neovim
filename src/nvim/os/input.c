@@ -242,8 +242,8 @@ bool os_isatty(int fd)
 
 size_t input_enqueue(String keys)
 {
-  char *ptr = keys.data;
-  char *end = ptr + keys.size;
+  const char *ptr = keys.data;
+  const char *end = ptr + keys.size;
 
   while (rbuffer_space(input_buffer) >= 19 && ptr < end) {
     // A "<x>" form occupies at least 1 characters, and produces up
@@ -253,9 +253,8 @@ size_t input_enqueue(String keys)
     // K_SPECIAL(0x80).
     uint8_t buf[19] = { 0 };
     // Do not simplify the keys here. Simplification will be done later.
-    unsigned int new_size
-      = trans_special((const char **)&ptr, (size_t)(end - ptr), (char *)buf, FSK_KEYCODE, true,
-                      NULL);
+    unsigned new_size
+      = trans_special(&ptr, (size_t)(end - ptr), (char *)buf, FSK_KEYCODE, true, NULL);
 
     if (new_size) {
       new_size = handle_mouse_event(&ptr, buf, new_size);
@@ -264,7 +263,7 @@ size_t input_enqueue(String keys)
     }
 
     if (*ptr == '<') {
-      char *old_ptr = ptr;
+      const char *old_ptr = ptr;
       // Invalid or incomplete key sequence, skip until the next '>' or *end.
       do {
         ptr++;
@@ -346,7 +345,7 @@ static uint8_t check_multiclick(int code, int grid, int row, int col)
 
 // Mouse event handling code(Extract row/col if available and detect multiple
 // clicks)
-static unsigned int handle_mouse_event(char **ptr, uint8_t *buf, unsigned int bufsize)
+static unsigned handle_mouse_event(const char **ptr, uint8_t *buf, unsigned bufsize)
 {
   int mouse_code = 0;
   int type = 0;
@@ -441,7 +440,7 @@ bool input_blocking(void)
 // This is a replacement for the old `WaitForChar` function in os_unix.c
 static InbufPollResult inbuf_poll(int ms, MultiQueue *events)
 {
-  if (input_ready(events)) {
+  if (os_input_ready(events)) {
     return kInputAvail;
   }
 
@@ -457,14 +456,14 @@ static InbufPollResult inbuf_poll(int ms, MultiQueue *events)
   DLOG("blocking... events_enabled=%d events_pending=%d", events != NULL,
        events && !multiqueue_empty(events));
   LOOP_PROCESS_EVENTS_UNTIL(&main_loop, NULL, ms,
-                            input_ready(events) || input_eof);
+                            os_input_ready(events) || input_eof);
   blocking = false;
 
   if (do_profiling == PROF_YES && ms) {
     prof_inchar_exit();
   }
 
-  if (input_ready(events)) {
+  if (os_input_ready(events)) {
     return kInputAvail;
   }
   return input_eof ? kInputEof : kInputNone;
@@ -530,8 +529,8 @@ static int push_event_key(uint8_t *buf, int maxlen)
   return buf_idx;
 }
 
-// Check if there's pending input
-static bool input_ready(MultiQueue *events)
+/// Check if there's pending input already in typebuf or `events`
+bool os_input_ready(MultiQueue *events)
 {
   return (typebuf_was_filled             // API call filled typeahead
           || rbuffer_size(input_buffer)  // Input buffer filled

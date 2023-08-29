@@ -112,7 +112,7 @@ func Test_mode_message_at_leaving_insert_by_ctrl_c()
 
   let rows = 10
   let buf = term_start([GetVimProg(), '--clean', '-S', testfile], {'term_rows': rows})
-  call term_wait(buf, 200)
+  call TermWait(buf, 100)
   call assert_equal('run', job_status(term_getjob(buf)))
 
   call term_sendkeys(buf, "i")
@@ -140,7 +140,7 @@ func Test_mode_message_at_leaving_insert_with_esc_mapped()
 
   let rows = 10
   let buf = term_start([GetVimProg(), '--clean', '-S', testfile], {'term_rows': rows})
-  call term_wait(buf, 200)
+  call WaitForAssert({-> assert_match('0,0-1\s*All$', term_getline(buf, rows - 1))})
   call assert_equal('run', job_status(term_getjob(buf)))
 
   call term_sendkeys(buf, "i")
@@ -341,6 +341,41 @@ func Test_message_more_scrollback()
   call StopVimInTerminal(buf)
 endfunc
 
+func Test_message_not_cleared_after_mode()
+  CheckRunVimInTerminal
+
+  let lines =<< trim END
+      nmap <silent> gx :call DebugSilent('normal')<CR>
+      vmap <silent> gx :call DebugSilent('visual')<CR>
+      function DebugSilent(arg)
+          echomsg "from DebugSilent" a:arg
+      endfunction
+      set showmode
+      set cmdheight=1
+      call test_settime(1)
+      call setline(1, ['one', 'NoSuchFile', 'three'])
+  END
+  call writefile(lines, 'XmessageMode', 'D')
+  let buf = RunVimInTerminal('-S XmessageMode', {'rows': 10})
+
+  call term_sendkeys(buf, 'gx')
+  call TermWait(buf)
+  call VerifyScreenDump(buf, 'Test_message_not_cleared_after_mode_1', {})
+
+  " removing the mode message used to also clear the intended message
+  call term_sendkeys(buf, 'vEgx')
+  call TermWait(buf)
+  call VerifyScreenDump(buf, 'Test_message_not_cleared_after_mode_2', {})
+
+  " removing the mode message used to also clear the error message
+  call term_sendkeys(buf, ":set cmdheight=2\<CR>")
+  call term_sendkeys(buf, '2GvEgf')
+  call TermWait(buf)
+  call VerifyScreenDump(buf, 'Test_message_not_cleared_after_mode_3', {})
+
+  call StopVimInTerminal(buf)
+endfunc
+
 " Test verbose message before echo command
 func Test_echo_verbose_system()
   CheckRunVimInTerminal
@@ -401,6 +436,21 @@ func Test_ask_yesno()
   call WaitForAssert({-> assert_equal('y2', term_getline(buf, 2))})
 
   call StopVimInTerminal(buf)
+endfunc
+
+func Test_null()
+  echom v:_null_list
+  echom v:_null_dict
+  echom v:_null_blob
+  echom v:_null_string
+  " Nvim doesn't have NULL functions
+  " echom test_null_function()
+  " Nvim doesn't have NULL partials
+  " echom test_null_partial()
+  if has('job')
+    echom test_null_job()
+    echom test_null_channel()
+  endif
 endfunc
 
 func Test_mapping_at_hit_return_prompt()

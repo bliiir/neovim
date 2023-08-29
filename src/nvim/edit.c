@@ -53,6 +53,7 @@
 #include "nvim/popupmenu.h"
 #include "nvim/pos.h"
 #include "nvim/search.h"
+#include "nvim/spell.h"
 #include "nvim/state.h"
 #include "nvim/strings.h"
 #include "nvim/syntax.h"
@@ -193,7 +194,7 @@ static void insert_enter(InsertState *s)
     }
   }
 
-  Insstart_textlen = (colnr_T)linetabsize(get_cursor_line_ptr());
+  Insstart_textlen = linetabsize_str(get_cursor_line_ptr());
   Insstart_blank_vcol = MAXCOL;
 
   if (!did_ai) {
@@ -231,8 +232,9 @@ static void insert_enter(InsertState *s)
   may_trigger_modechanged();
   stop_insert_mode = false;
 
-  // need to position cursor again when on a TAB
-  if (gchar_cursor() == TAB) {
+  // need to position cursor again when on a TAB and
+  // when on a char with inline virtual text
+  if (gchar_cursor() == TAB || curbuf->b_virt_text_inline > 0) {
     curwin->w_valid &= ~(VALID_WROW|VALID_WCOL|VALID_VIRTCOL);
   }
 
@@ -609,7 +611,9 @@ static int insert_execute(VimState *state, int key)
     }
   }
 
-  s->c = do_digraph(s->c);
+  if (s->c != K_EVENT) {
+    s->c = do_digraph(s->c);
+  }
 
   if ((s->c == Ctrl_V || s->c == Ctrl_Q) && ctrl_x_mode_cmdline()) {
     insert_do_complete(s);
@@ -876,12 +880,12 @@ static int insert_handle_key(InsertState *s)
     state_handle_k_event();
     goto check_pum;
 
-  case K_COMMAND:       // some command
+  case K_COMMAND:     // <Cmd>command<CR>
     do_cmdline(NULL, getcmdkeycmd, NULL, 0);
     goto check_pum;
 
   case K_LUA:
-    map_execute_lua();
+    map_execute_lua(false);
 
 check_pum:
     // nvim_select_popupmenu_item() can be called from the handling of
@@ -1284,7 +1288,8 @@ void ins_redraw(bool ready)
   // Trigger CursorMoved if the cursor moved.  Not when the popup menu is
   // visible, the command might delete it.
   if (ready && has_event(EVENT_CURSORMOVEDI)
-      && !equalpos(curwin->w_last_cursormoved, curwin->w_cursor)
+      && (last_cursormoved_win != curwin
+          || !equalpos(last_cursormoved, curwin->w_cursor))
       && !pum_visible()) {
     // Need to update the screen first, to make sure syntax
     // highlighting is correct after making a change (e.g., inserting
@@ -1297,7 +1302,8 @@ void ins_redraw(bool ready)
     // getcurpos()
     update_curswant();
     ins_apply_autocmds(EVENT_CURSORMOVEDI);
-    curwin->w_last_cursormoved = curwin->w_cursor;
+    last_cursormoved_win = curwin;
+    last_cursormoved = curwin->w_cursor;
   }
 
   // Trigger TextChangedI if changedtick differs.
@@ -1349,6 +1355,11 @@ void ins_redraw(bool ready)
     apply_autocmds(EVENT_BUFMODIFIEDSET, NULL, NULL, false, curbuf);
     curbuf->b_changed_invalid = false;
   }
+
+  // Trigger SafeState if nothing is pending.
+  may_trigger_safestate(ready
+                        && !ins_compl_active()
+                        && !pum_visible());
 
   pum_check_clear();
   show_cursor_info_later(false);
@@ -1526,10 +1537,11 @@ void edit_unputchar(void)
   }
 }
 
-// Called when p_dollar is set: display a '$' at the end of the changed text
-// Only works when cursor is in the line that changes.
-void display_dollar(colnr_T col)
+/// Called when "$" is in 'cpoptions': display a '$' at the end of the changed
+/// text.  Only works when cursor is in the line that changes.
+void display_dollar(colnr_T col_arg)
 {
+  colnr_T col = col_arg < 0 ? 0 : col_arg;
   colnr_T save_col;
 
   if (!redrawing()) {
@@ -1696,7 +1708,7 @@ void change_indent(int type, int amount, int round, int replaced, int call_chang
     curwin->w_cursor.col = (colnr_T)new_cursor_col;
   }
   curwin->w_set_curswant = true;
-  changed_cline_bef_curs();
+  changed_cline_bef_curs(curwin);
 
   // May have to adjust the start of the insert.
   if (State & MODE_INSERT) {
@@ -1858,7 +1870,7 @@ int get_literal(bool no_simplify)
   no_mapping++;                 // don't map the next key hits
   cc = 0;
   i = 0;
-  for (;;) {
+  while (true) {
     nc = plain_vgetc();
     if (!no_simplify) {
       nc = merge_modifiers(nc, &mod_mask);
@@ -2251,7 +2263,7 @@ int stop_arrow(void)
       // right, except when nothing was inserted yet.
       update_Insstart_orig = false;
     }
-    Insstart_textlen = (colnr_T)linetabsize(get_cursor_line_ptr());
+    Insstart_textlen = linetabsize_str(get_cursor_line_ptr());
 
     if (u_save_cursor() == OK) {
       arrow_used = false;
@@ -2356,7 +2368,7 @@ static void stop_insert(pos_T *end_insert_pos, int esc, int nomove)
 
       curwin->w_cursor = *end_insert_pos;
       check_cursor_col();        // make sure it is not past the line
-      for (;;) {
+      while (true) {
         if (gchar_cursor() == NUL && curwin->w_cursor.col > 0) {
           curwin->w_cursor.col--;
         }
@@ -2449,6 +2461,7 @@ void beginline(int flags)
     }
     curwin->w_set_curswant = true;
   }
+  adjust_skipcol();
 }
 
 // oneright oneleft cursor_down cursor_up
@@ -2490,6 +2503,7 @@ int oneright(void)
   curwin->w_cursor.col += l;
 
   curwin->w_set_curswant = true;
+  adjust_skipcol();
   return OK;
 }
 
@@ -2505,7 +2519,7 @@ int oneleft(void)
 
     // We might get stuck on 'showbreak', skip over it.
     width = 1;
-    for (;;) {
+    while (true) {
       coladvance(v - width);
       // getviscol() is slow, skip it when 'showbreak' is empty,
       // 'breakindent' is not set and there are no multi-byte
@@ -2525,6 +2539,7 @@ int oneleft(void)
     }
 
     curwin->w_set_curswant = true;
+    adjust_skipcol();
     return OK;
   }
 
@@ -2538,20 +2553,16 @@ int oneleft(void)
   // if the character on the left of the current cursor is a multi-byte
   // character, move to its first byte
   mb_adjust_cursor();
+  adjust_skipcol();
   return OK;
 }
 
 /// Move the cursor up "n" lines in window "wp".
 /// Takes care of closed folds.
-/// Returns the new cursor line or zero for failure.
-linenr_T cursor_up_inner(win_T *wp, long n)
+void cursor_up_inner(win_T *wp, linenr_T n)
 {
   linenr_T lnum = wp->w_cursor.lnum;
 
-  // This fails if the cursor is already in the first line.
-  if (lnum <= 1) {
-    return 0;
-  }
   if (n >= lnum) {
     lnum = 1;
   } else if (hasAnyFolding(wp)) {
@@ -2577,19 +2588,20 @@ linenr_T cursor_up_inner(win_T *wp, long n)
       lnum = 1;
     }
   } else {
-    lnum -= (linenr_T)n;
+    lnum -= n;
   }
 
   wp->w_cursor.lnum = lnum;
-  return lnum;
 }
 
 /// @param upd_topline  When true: update topline
-int cursor_up(long n, int upd_topline)
+int cursor_up(linenr_T n, int upd_topline)
 {
-  if (n > 0 && cursor_up_inner(curwin, n) == 0) {
+  // This fails if the cursor is already in the first line.
+  if (n > 0 && curwin->w_cursor.lnum <= 1) {
     return FAIL;
   }
+  cursor_up_inner(curwin, n);
 
   // try to advance to the column we want to be at
   coladvance(curwin->w_curswant);
@@ -2603,18 +2615,11 @@ int cursor_up(long n, int upd_topline)
 
 /// Move the cursor down "n" lines in window "wp".
 /// Takes care of closed folds.
-/// Returns the new cursor line or zero for failure.
-linenr_T cursor_down_inner(win_T *wp, long n)
+void cursor_down_inner(win_T *wp, long n)
 {
   linenr_T lnum = wp->w_cursor.lnum;
   linenr_T line_count = wp->w_buffer->b_ml.ml_line_count;
 
-  // Move to last line of fold, will fail if it's the end-of-file.
-  (void)hasFoldingWin(wp, lnum, NULL, &lnum, true, NULL);
-  // This fails if the cursor is already in the last line.
-  if (lnum >= line_count) {
-    return FAIL;
-  }
   if (lnum + n >= line_count) {
     lnum = line_count;
   } else if (hasAnyFolding(wp)) {
@@ -2622,6 +2627,7 @@ linenr_T cursor_down_inner(win_T *wp, long n)
 
     // count each sequence of folded lines as one logical line
     while (n--) {
+      // Move to last line of fold, will fail if it's the end-of-file.
       if (hasFoldingWin(wp, lnum, NULL, &last, true, NULL)) {
         lnum = last + 1;
       } else {
@@ -2639,15 +2645,16 @@ linenr_T cursor_down_inner(win_T *wp, long n)
   }
 
   wp->w_cursor.lnum = lnum;
-  return lnum;
 }
 
 /// @param upd_topline  When true: update topline
 int cursor_down(long n, int upd_topline)
 {
-  if (n > 0 && cursor_down_inner(curwin, n) == 0) {
+  // This fails if the cursor is already in the last line.
+  if (n > 0 && curwin->w_cursor.lnum >= curwin->w_buffer->b_ml.ml_line_count) {
     return FAIL;
   }
+  cursor_down_inner(curwin, n);
 
   // try to advance to the column we want to be at
   coladvance(curwin->w_curswant);
@@ -2699,7 +2706,7 @@ int stuff_inserted(int c, long count, int no_esc)
   }
 
   do {
-    stuffReadbuff((const char *)ptr);
+    stuffReadbuff(ptr);
     // A trailing "0" is inserted as "<C-V>048", "^" as "<C-V>^".
     if (last) {
       stuffReadbuff(last == '0' ? "\026\060\064\070" : "\026^");
@@ -2886,7 +2893,7 @@ static void mb_replace_pop_ins(int cc)
   }
 
   // Handle composing chars.
-  for (;;) {
+  while (true) {
     int c = replace_pop();
     if (c == -1) {                // stack empty
       break;
@@ -3465,8 +3472,9 @@ static bool ins_esc(long *count, int cmdchar, bool nomove)
 
   State = MODE_NORMAL;
   may_trigger_modechanged();
-  // need to position cursor again when on a TAB
-  if (gchar_cursor() == TAB) {
+  // need to position cursor again when on a TAB and
+  // when on a char with inline virtual text
+  if (gchar_cursor() == TAB || curbuf->b_virt_text_inline > 0) {
     curwin->w_valid &= ~(VALID_WROW|VALID_WCOL|VALID_VIRTCOL);
   }
 
@@ -3767,7 +3775,7 @@ static bool ins_bs(int c, int mode, int *inserted_space_p)
         // again when auto-formatting.
         if (has_format_option(FO_AUTO)
             && has_format_option(FO_WHITE_PAR)) {
-          char *ptr = ml_get_buf(curbuf, curwin->w_cursor.lnum, true);
+          char *ptr = ml_get_buf_mut(curbuf, curwin->w_cursor.lnum);
           int len;
 
           len = (int)strlen(ptr);
@@ -3989,82 +3997,6 @@ static bool ins_bs(int c, int mode, int *inserted_space_p)
   return did_backspace;
 }
 
-static void ins_mouse(int c)
-{
-  pos_T tpos;
-  win_T *old_curwin = curwin;
-
-  undisplay_dollar();
-  tpos = curwin->w_cursor;
-  if (do_mouse(NULL, c, BACKWARD, 1, 0)) {
-    win_T *new_curwin = curwin;
-
-    if (curwin != old_curwin && win_valid(old_curwin)) {
-      // Mouse took us to another window.  We need to go back to the
-      // previous one to stop insert there properly.
-      curwin = old_curwin;
-      curbuf = curwin->w_buffer;
-      if (bt_prompt(curbuf)) {
-        // Restart Insert mode when re-entering the prompt buffer.
-        curbuf->b_prompt_insert = 'A';
-      }
-    }
-    start_arrow(curwin == old_curwin ? &tpos : NULL);
-    if (curwin != new_curwin && win_valid(new_curwin)) {
-      curwin = new_curwin;
-      curbuf = curwin->w_buffer;
-    }
-    can_cindent = true;
-  }
-
-  // redraw status lines (in case another window became active)
-  redraw_statuslines();
-}
-
-static void ins_mousescroll(int dir)
-{
-  win_T *const old_curwin = curwin;
-  pos_T tpos = curwin->w_cursor;
-
-  if (mouse_row >= 0 && mouse_col >= 0) {
-    int row = mouse_row, col = mouse_col, grid = mouse_grid;
-
-    // find the window at the pointer coordinates
-    win_T *wp = mouse_find_win(&grid, &row, &col);
-    if (wp == NULL) {
-      return;
-    }
-    curwin = wp;
-    curbuf = curwin->w_buffer;
-  }
-  if (curwin == old_curwin) {
-    undisplay_dollar();
-  }
-
-  // Don't scroll the window in which completion is being done.
-  if (!pum_visible() || curwin != old_curwin) {
-    if (dir == MSCR_DOWN || dir == MSCR_UP) {
-      if (mod_mask & (MOD_MASK_SHIFT | MOD_MASK_CTRL)) {
-        scroll_redraw(dir, (long)(curwin->w_botline - curwin->w_topline));
-      } else if (p_mousescroll_vert > 0) {
-        scroll_redraw(dir, p_mousescroll_vert);
-      }
-    } else {
-      mouse_scroll_horiz(dir);
-    }
-  }
-
-  curwin->w_redr_status = true;
-
-  curwin = old_curwin;
-  curbuf = curwin->w_buffer;
-
-  if (!equalpos(curwin->w_cursor, tpos)) {
-    start_arrow(&tpos);
-    can_cindent = true;
-  }
-}
-
 static void ins_left(void)
 {
   pos_T tpos;
@@ -4253,7 +4185,7 @@ static void ins_pageup(void)
   }
 
   tpos = curwin->w_cursor;
-  if (onepage(BACKWARD, 1L) == OK) {
+  if (onepage(BACKWARD, 1) == OK) {
     start_arrow(&tpos);
     can_cindent = true;
   } else {
@@ -4301,7 +4233,7 @@ static void ins_pagedown(void)
   }
 
   tpos = curwin->w_cursor;
-  if (onepage(FORWARD, 1L) == OK) {
+  if (onepage(FORWARD, 1) == OK) {
     start_arrow(&tpos);
     can_cindent = true;
   } else {

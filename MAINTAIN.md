@@ -25,7 +25,7 @@ The forecasting problem might be solved with an explicit priority system (like
 Bram's todo.txt). Meanwhile the Neovim priority system is defined by:
 
 * PRs nearing completion.
-* Issue labels. E.g. the `+plan` label increases the ticket's priority merely
+* Issue labels. E.g. the `has:plan` label increases the ticket's priority merely
   for having a plan written down: it is _closer to completion_ than tickets
   without a plan.
 * Comment activity or new information.
@@ -60,6 +60,52 @@ has a major bug:
 Neovim automation includes a [backport bot](https://github.com/zeebe-io/backport-action).
 Trigger the action by labeling a PR with `backport release-X.Y`. See `.github/workflows/backport.yml`.
 
+Deprecating and removing features
+---------------------------------
+
+Neovim inherits many features and design decisions from Vim, not all of which
+align with the goals of this project. It is sometimes desired or necessary to
+remove existing features, or refactor parts of the code that would change
+user's workflow. In these cases, a deprecation policy is needed to properly
+inform users of the change.
+
+In general, when a feature is slated to be removed it should:
+
+1. Be _soft_ deprecated in the _next_ release
+  - Use of the deprecated feature will still work.
+  - This means deprecating via documentation and annotation (`@deprecated`) only.
+  - Include a note in `news.txt` under `DEPRECATIONS`.
+2. Be _hard_ deprecated in a following a release in which it was soft deprecated.
+  - Use of the deprecated feature will still work but should issue a warning
+    (typically via `vim.deprecate()` for Lua features).
+  - Features implemented in Vimscript or in C will need bespoke implementations
+    to communicate to users that the feature is deprecated
+3. Be removed in a release following the release in which it was hard deprecated
+  - Usually this will be the next release, but it may be a later release if a
+    longer deprecation cycle is desired
+  - If possible, keep the feature as a stub (e.g. function API) and issue an error
+    when it is accessed.
+
+Example:
+
+```
+                Deprecation                            Removal
+                     ┆                 ┆                 ┆
+                     ┆      Soft       ┆      Hard       ┆
+                     ┆   Deprecation   ┆   Deprecation   ┆
+                     ┆     Period      ┆     Preiod      ┆
+         ────────────────────────────────────────────────────────────
+Version:            0.10              0.11              0.12
+         ────────────────────────────────────────────────────────────
+         Old code         Old code          Old code
+                             +                 +
+                          New code          New code         New code
+```
+
+Feature removals which may benefit from community input or further discussion
+should also have a tracking issue (which should be linked to in the release
+notes).
+
 Third-party dependencies
 ------------------------
 
@@ -89,10 +135,12 @@ These dependencies are "vendored" (inlined), we must update the sources manually
     * send improvements upstream!
 * `src/xdiff/`: [xdiff](https://github.com/git/git/tree/master/xdiff)
 * `src/cjson/`: [lua-cjson](https://github.com/openresty/lua-cjson)
-* `src/nvim/lib/`: [Klib](https://github.com/attractivechaos/klib)
+* `src/klib/`: [Klib](https://github.com/attractivechaos/klib)
 * `runtime/lua/vim/inspect.lua`: [inspect.lua](https://github.com/kikito/inspect.lua)
 * `src/nvim/tui/terminfo_defs.h`: terminfo definitions
     * Run `scripts/update_terminfo.sh` to update these definitions.
+* `runtime/lua/vim/lsp/_meta/protocol.lua`: LSP specification
+    * Run `scripts/gen_lsp.lua` to update.
 * `src/bit.c`: only for PUC lua: port of `require'bit'` from luajit https://bitop.luajit.org/
 * [treesitter parsers](https://github.com/neovim/neovim/blob/fcc24e43e0b5f9d801a01ff2b8f78ce8c16dd551/cmake.deps/CMakeLists.txt#L197-L210)
 
@@ -100,36 +148,49 @@ These dependencies are "vendored" (inlined), we must update the sources manually
 
 We may maintain forks, if we are waiting on upstream changes: https://github.com/neovim/neovim/wiki/Deps
 
-CI
---------------
+Non-technical dependencies
+--------------------------
 
-### General
+* GitHub users:
+    * https://github.com/marvim
+    * https://github.com/nvim-winget
+* Domain names (held in https://namecheap.com):
+    * neovim.org
+    * neovim.io
+    * packspec.org
+    * pkgjson.org
+* DNS for the above domains is managed in https://cloudflare.com (not the domain registrar)
 
-As our CI is primarily dependent on GitHub Actions at the moment, then so will
-our CI strategy be. The following guidelines have worked well for us so far:
+Automation (CI)
+---------------
 
-* Never use a macOS runner if an Ubuntu or a Windows runner can be used
-  instead. This is because macOS runners have a [tighter restrictions on the
-  number of concurrent jobs](https://docs.github.com/en/actions/learn-github-actions/usage-limits-billing-and-administration#usage-limits).
+### Backup
 
-### Runner versions
+Discussions from issues and PRs are backed up here:
+https://github.com/neovim/neovim-backup
 
-* For special-purpose jobs where the runner version doesn't really matter,
-  prefer `-latest` tags so we don't need to manually bump the versions. An
-  example of a special-purpose workflow is `labeler.yml`.
+### Development guidelines
 
-* For our testing jobs, which are in `test.yml` and `build.yml`, prefer to use
-  the latest stable (i.e. non-beta) version explicitly. Avoid using the
-  `-latest` tags here as it makes it difficult to determine from an unrelated
-  PR if a failure is due to the PR itself or due to GitHub bumping the
-  `-latest` tag without our knowledge. There's also a high risk that automatic
-  bumping the CI versions will fail due to manual work being required from
-  experience.
+* CI and automation jobs are primarily driven by GitHub Actions.
+* Avoid macOS if an Ubuntu or a Windows runner can be used instead. This is
+  because macOS runners have [tighter restrictions on the number of concurrent
+  jobs](https://docs.github.com/en/actions/learn-github-actions/usage-limits-billing-and-administration#usage-limits).
 
-* For our release job, which is `release.yml`, prefer to use the oldest stable
-  (i.e. non-deprecated) versions available. The reason is that we're trying to
-  produce images that work in the broadest number of environments, and
-  therefore want to use older releases.
+* Runner versions:
+    * For special-purpose jobs where the runner version doesn't really matter,
+      prefer `-latest` tags so we don't need to manually bump the versions. An
+      example of a special-purpose workflow is `labeler.yml`.
+    * For our testing jobs, which are in `test.yml` and `build.yml`, prefer to
+      use the latest stable (i.e. non-beta) version explicitly. Avoid using the
+      `-latest` tags here as it makes it difficult to determine from an
+      unrelated PR if a failure is due to the PR itself or due to GitHub bumping
+      the `-latest` tag without our knowledge. There's also a high risk that
+      automatically bumping the CI versions will fail due to manual work being
+      required from experience.
+    * For our release job, which is `release.yml`, prefer to use the oldest
+      stable (i.e. non-deprecated) versions available. The reason is that we're
+      trying to produce images that work in the broadest number of environments,
+      and therefore want to use older releases.
 
 See also
 --------

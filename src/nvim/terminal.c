@@ -79,6 +79,7 @@
 #include "nvim/move.h"
 #include "nvim/msgpack_rpc/channel_defs.h"
 #include "nvim/normal.h"
+#include "nvim/ops.h"
 #include "nvim/option.h"
 #include "nvim/optionstr.h"
 #include "nvim/pos.h"
@@ -169,7 +170,7 @@ static VTermScreenCallbacks vterm_screen_callbacks = {
   .sb_popline  = term_sb_pop,
 };
 
-static PMap(ptr_t) invalidated_terminals = MAP_INIT;
+static Set(ptr_t) invalidated_terminals = SET_INIT;
 
 void terminal_init(void)
 {
@@ -183,10 +184,10 @@ void terminal_teardown(void)
   time_watcher_stop(&refresh_timer);
   multiqueue_free(refresh_timer.events);
   time_watcher_close(&refresh_timer, NULL);
-  pmap_destroy(ptr_t)(&invalidated_terminals);
+  set_destroy(ptr_t, &invalidated_terminals);
   // terminal_destroy might be called after terminal_teardown is invoked
   // make sure it is in an empty, valid state
-  pmap_init(ptr_t, &invalidated_terminals);
+  invalidated_terminals = (Set(ptr_t)) SET_INIT;
 }
 
 static void term_output_callback(const char *s, size_t len, void *user_data)
@@ -220,6 +221,7 @@ Terminal *terminal_open(buf_T *buf, TerminalOptions opts)
   // Set up screen
   rv->vts = vterm_obtain_screen(rv->vt);
   vterm_screen_enable_altscreen(rv->vts, true);
+  vterm_screen_enable_reflow(rv->vts, true);
   // delete empty lines at the end of the buffer
   vterm_screen_set_callbacks(rv->vts, &vterm_screen_callbacks, rv);
   vterm_screen_set_damage_merge(rv->vts, VTERM_DAMAGE_SCROLL);
@@ -234,7 +236,7 @@ Terminal *terminal_open(buf_T *buf, TerminalOptions opts)
   aucmd_prepbuf(&aco, buf);
 
   refresh_screen(rv, buf);
-  set_option_value("buftype", 0, "terminal", OPT_LOCAL);  // -V666
+  set_option_value("buftype", STATIC_CSTR_AS_OPTVAL("terminal"), OPT_LOCAL);  // -V666
 
   // Default settings for terminal buffers
   buf->b_p_ma = false;     // 'nomodifiable'
@@ -242,8 +244,8 @@ Terminal *terminal_open(buf_T *buf, TerminalOptions opts)
   buf->b_p_scbk =          // 'scrollback' (initialize local from global)
                   (p_scbk < 0) ? 10000 : MAX(1, p_scbk);
   buf->b_p_tw = 0;         // 'textwidth'
-  set_option_value("wrap", false, NULL, OPT_LOCAL);
-  set_option_value("list", false, NULL, OPT_LOCAL);
+  set_option_value("wrap", BOOLEAN_OPTVAL(false), OPT_LOCAL);
+  set_option_value("list", BOOLEAN_OPTVAL(false), OPT_LOCAL);
   if (buf->b_ffname != NULL) {
     buf_set_term_title(buf, buf->b_ffname, strlen(buf->b_ffname));
   }
@@ -531,6 +533,7 @@ static int terminal_check(VimState *state)
   }
 
   terminal_check_cursor();
+  validate_cursor();
 
   if (must_redraw) {
     update_screen();
@@ -575,6 +578,8 @@ static int terminal_execute(VimState *state, int key)
   case K_RIGHTRELEASE:
   case K_MOUSEDOWN:
   case K_MOUSEUP:
+  case K_MOUSELEFT:
+  case K_MOUSERIGHT:
     if (send_mouse_event(s->term, key)) {
       return 0;
     }
@@ -596,7 +601,7 @@ static int terminal_execute(VimState *state, int key)
     break;
 
   case K_LUA:
-    map_execute_lua();
+    map_execute_lua(false);
     break;
 
   case Ctrl_N:
@@ -652,12 +657,12 @@ void terminal_destroy(Terminal **termpp)
   }
 
   if (!term->refcount) {
-    if (pmap_has(ptr_t)(&invalidated_terminals, term)) {
+    if (set_has(ptr_t, &invalidated_terminals, term)) {
       // flush any pending changes to the buffer
       block_autocmds();
       refresh_terminal(term);
       unblock_autocmds();
-      pmap_del(ptr_t)(&invalidated_terminals, term);
+      set_del(ptr_t, &invalidated_terminals, term);
     }
     for (size_t i = 0; i < term->sb_current; i++) {
       xfree(term->sb_buffer[i]);
@@ -680,7 +685,7 @@ void terminal_send(Terminal *term, char *data, size_t size)
 
 static bool is_filter_char(int c)
 {
-  unsigned int flag = 0;
+  unsigned flag = 0;
   switch (c) {
   case 0x08:
     flag = TPF_BS;
@@ -765,7 +770,7 @@ void terminal_send_key(Terminal *term, int c)
 
   if (key) {
     vterm_keyboard_key(term->vt, key, mod);
-  } else {
+  } else if (!IS_SPECIAL(c)) {
     vterm_keyboard_unichar(term->vt, (uint32_t)c, mod);
   }
 }
@@ -839,7 +844,7 @@ void terminal_get_line_attributes(Terminal *term, win_T *wp, int linenr, int *te
                    | (cell.attrs.italic ? HL_ITALIC : 0)
                    | (cell.attrs.reverse ? HL_INVERSE : 0)
                    | get_underline_hl_flag(cell.attrs)
-                   | (cell.attrs.strike ? HL_STRIKETHROUGH: 0)
+                   | (cell.attrs.strike ? HL_STRIKETHROUGH : 0)
                    | ((fg_indexed && !fg_set) ? HL_FG_INDEXED : 0)
                    | ((bg_indexed && !bg_set) ? HL_BG_INDEXED : 0);
 
@@ -896,13 +901,13 @@ static int term_moverect(VTermRect dest, VTermRect src, void *data)
   return 1;
 }
 
-static int term_movecursor(VTermPos new, VTermPos old, int visible, void *data)
+static int term_movecursor(VTermPos new_pos, VTermPos old_pos, int visible, void *data)
 {
   Terminal *term = data;
-  term->cursor.row = new.row;
-  term->cursor.col = new.col;
-  invalidate_terminal(term, old.row, old.row + 1);
-  invalidate_terminal(term, new.row, new.row + 1);
+  term->cursor.row = new_pos.row;
+  term->cursor.col = new_pos.col;
+  invalidate_terminal(term, old_pos.row, old_pos.row + 1);
+  invalidate_terminal(term, new_pos.row, new_pos.row + 1);
   return 1;
 }
 
@@ -1027,7 +1032,7 @@ static int term_sb_push(int cols, const VTermScreenCell *cells, void *data)
   }
 
   memcpy(sbrow->cells, cells, sizeof(cells[0]) * c);
-  pmap_put(ptr_t)(&invalidated_terminals, term, NULL);
+  set_put(ptr_t, &invalidated_terminals, term);
 
   return 1;
 }
@@ -1068,7 +1073,7 @@ static int term_sb_pop(int cols, VTermScreenCell *cells, void *data)
   }
 
   xfree(sbrow);
-  pmap_put(ptr_t)(&invalidated_terminals, term, NULL);
+  set_put(ptr_t, &invalidated_terminals, term);
 
   return 1;
 }
@@ -1094,6 +1099,8 @@ static void convert_modifiers(int key, VTermModifier *statep)
   case K_S_DOWN:
   case K_S_LEFT:
   case K_S_RIGHT:
+  case K_S_HOME:
+  case K_S_END:
   case K_S_F1:
   case K_S_F2:
   case K_S_F3:
@@ -1111,6 +1118,8 @@ static void convert_modifiers(int key, VTermModifier *statep)
 
   case K_C_LEFT:
   case K_C_RIGHT:
+  case K_C_HOME:
+  case K_C_END:
     *statep |= VTERM_MOD_CTRL;
     break;
   }
@@ -1157,8 +1166,16 @@ static VTermKey convert_key(int key, VTermModifier *statep)
     return VTERM_KEY_INS;
   case K_DEL:
     return VTERM_KEY_DEL;
+  case K_S_HOME:
+    FALLTHROUGH;
+  case K_C_HOME:
+    FALLTHROUGH;
   case K_HOME:
     return VTERM_KEY_HOME;
+  case K_S_END:
+    FALLTHROUGH;
+  case K_C_END:
+    FALLTHROUGH;
   case K_END:
     return VTERM_KEY_END;
   case K_PAGEUP:
@@ -1426,25 +1443,51 @@ static bool send_mouse_event(Terminal *term, int c)
       pressed = true; button = 4; break;
     case K_MOUSEUP:
       pressed = true; button = 5; break;
+    case K_MOUSELEFT:
+      pressed = true; button = 7; break;
+    case K_MOUSERIGHT:
+      pressed = true; button = 6; break;
     default:
       return false;
     }
 
-    mouse_action(term, button, row, col - offset, pressed, 0);
+    VTermModifier mod = VTERM_MOD_NONE;
+    convert_modifiers(c, &mod);
+    mouse_action(term, button, row, col - offset, pressed, mod);
     return false;
   }
 
-  if (c == K_MOUSEDOWN || c == K_MOUSEUP) {
+  if (c == K_MOUSEUP || c == K_MOUSEDOWN || c == K_MOUSELEFT || c == K_MOUSERIGHT) {
     win_T *save_curwin = curwin;
     // switch window/buffer to perform the scroll
     curwin = mouse_win;
     curbuf = curwin->w_buffer;
-    int direction = c == K_MOUSEDOWN ? MSCR_DOWN : MSCR_UP;
-    if (mod_mask & (MOD_MASK_SHIFT | MOD_MASK_CTRL)) {
-      scroll_redraw(direction, curwin->w_botline - curwin->w_topline);
-    } else if (p_mousescroll_vert > 0) {
-      scroll_redraw(direction, p_mousescroll_vert);
+
+    cmdarg_T cap;
+    oparg_T oa;
+    CLEAR_FIELD(cap);
+    clear_oparg(&oa);
+    cap.oap = &oa;
+
+    switch (cap.cmdchar = c) {
+    case K_MOUSEUP:
+      cap.arg = MSCR_UP;
+      break;
+    case K_MOUSEDOWN:
+      cap.arg = MSCR_DOWN;
+      break;
+    case K_MOUSELEFT:
+      cap.arg = MSCR_LEFT;
+      break;
+    case K_MOUSERIGHT:
+      cap.arg = MSCR_RIGHT;
+      break;
+    default:
+      abort();
     }
+
+    // Call the common mouse scroll function shared with other modes.
+    do_mousescroll(&cap);
 
     curwin->w_redr_status = true;
     curwin = save_curwin;
@@ -1524,7 +1567,7 @@ static void invalidate_terminal(Terminal *term, int start_row, int end_row)
     term->invalid_end = MAX(term->invalid_end, end_row);
   }
 
-  pmap_put(ptr_t)(&invalidated_terminals, term, NULL);
+  set_put(ptr_t, &invalidated_terminals, term);
   if (!refresh_pending) {
     time_watcher_start(&refresh_timer, refresh_timer_cb, REFRESH_DELAY, 0);
     refresh_pending = true;
@@ -1567,10 +1610,10 @@ static void refresh_timer_cb(TimeWatcher *watcher, void *data)
   void *stub; (void)(stub);
   // don't process autocommands while updating terminal buffers
   block_autocmds();
-  map_foreach(&invalidated_terminals, term, stub, {
+  set_foreach(&invalidated_terminals, term, {
     refresh_terminal(term);
   });
-  pmap_clear(ptr_t)(&invalidated_terminals);
+  set_clear(ptr_t, &invalidated_terminals);
   unblock_autocmds();
 }
 
@@ -1707,7 +1750,7 @@ static void refresh_screen(Terminal *term, buf_T *buf)
 
   int change_start = row_to_linenr(term, term->invalid_start);
   int change_end = change_start + changed;
-  changed_lines(change_start, 0, change_end, added, true);
+  changed_lines(buf, change_start, 0, change_end, added, true);
   term->invalid_start = INT_MAX;
   term->invalid_end = -1;
 }

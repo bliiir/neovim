@@ -10,7 +10,7 @@
 #include "nvim/eval/typval_defs.h"
 #include "nvim/ex_cmds_defs.h"
 #include "nvim/func_attr.h"
-#include "nvim/grid_defs.h"  // for StlClickRecord
+#include "nvim/grid_defs.h"
 #include "nvim/macros.h"
 #include "nvim/memline.h"
 #include "nvim/memline_defs.h"
@@ -138,7 +138,7 @@ static inline void buf_inc_changedtick(buf_T *const buf)
 static inline bool buf_is_empty(buf_T *buf)
 {
   return buf->b_ml.ml_line_count == 1
-         && *ml_get_buf(buf, (linenr_T)1, false) == '\0';
+         && *ml_get_buf(buf, (linenr_T)1) == '\0';
 }
 
 #endif  // NVIM_BUFFER_H

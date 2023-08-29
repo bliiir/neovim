@@ -181,7 +181,7 @@ void msg_grid_validate(void)
     msg_grid.dirty_col = xcalloc((size_t)Rows, sizeof(*msg_grid.dirty_col));
 
     // Tricky: allow resize while pager or ex mode is active
-    int pos = MAX(max_rows - msg_scrolled, 0);
+    int pos = (State & MODE_ASKMORE) ? 0 : MAX(max_rows - msg_scrolled, 0);
     msg_grid.throttled = false;  // don't throttle in 'cmdheight' area
     msg_grid_set_pos(pos, msg_scrolled);
     ui_comp_put_grid(&msg_grid, pos, 0, msg_grid.rows, msg_grid.cols,
@@ -438,7 +438,7 @@ void trunc_string(const char *s, char *buf, int room_in, int buflen)
 
   // Last part: End of the string.
   half = i = (int)strlen(s);
-  for (;;) {
+  while (true) {
     do {
       half = half - utf_head_off(s, s + half - 1) - 1;
     } while (half > 0 && utf_iscomposing(utf_ptr2char(s + half)));
@@ -885,6 +885,24 @@ void msg_schedule_semsg(const char *const fmt, ...)
   loop_schedule_deferred(&main_loop, event_create(msg_semsg_event, 1, s));
 }
 
+static void msg_semsg_multiline_event(void **argv)
+{
+  char *s = argv[0];
+  (void)emsg_multiline(s, true);
+  xfree(s);
+}
+
+void msg_schedule_semsg_multiline(const char *const fmt, ...)
+{
+  va_list ap;
+  va_start(ap, fmt);
+  vim_vsnprintf(IObuff, IOSIZE, fmt, ap);
+  va_end(ap);
+
+  char *s = xstrdup(IObuff);
+  loop_schedule_deferred(&main_loop, event_create(msg_semsg_multiline_event, 1, s));
+}
+
 /// Like msg(), but truncate to a single line if p_shm contains 't', or when
 /// "force" is true.  This truncates in another way as for normal messages.
 /// Careful: The string may be changed by msg_may_trunc()!
@@ -1069,7 +1087,7 @@ void ex_messages(void *const eap_p)
     for (; p != NULL; p = p->next) {
       if (kv_size(p->multiattr) || (p->msg && p->msg[0])) {
         Array entry = ARRAY_DICT_INIT;
-        ADD(entry, STRING_OBJ(cstr_to_string(p->kind)));
+        ADD(entry, CSTR_TO_OBJ(p->kind));
         Array content = ARRAY_DICT_INIT;
         if (kv_size(p->multiattr)) {
           for (uint32_t i = 0; i < kv_size(p->multiattr); i++) {
@@ -1082,7 +1100,7 @@ void ex_messages(void *const eap_p)
         } else if (p->msg && p->msg[0]) {
           Array content_entry = ARRAY_DICT_INIT;
           ADD(content_entry, INTEGER_OBJ(p->attr));
-          ADD(content_entry, STRING_OBJ(cstr_to_string(p->msg)));
+          ADD(content_entry, CSTR_TO_OBJ(p->msg));
           ADD(content, ARRAY_OBJ(content_entry));
         }
         ADD(entry, ARRAY_OBJ(content));
@@ -1250,6 +1268,7 @@ void wait_return(int redraw)
              || c == K_MOUSEDOWN || c == K_MOUSEUP
              || c == K_MOUSEMOVE);
     os_breakcheck();
+
     // Avoid that the mouse-up event causes visual mode to start.
     if (c == K_LEFTMOUSE || c == K_MIDDLEMOUSE || c == K_RIGHTMOUSE
         || c == K_X1MOUSE || c == K_X2MOUSE) {
@@ -1488,17 +1507,17 @@ void msg_outnum(long n)
   msg_puts(buf);
 }
 
-void msg_home_replace(char *fname)
+void msg_home_replace(const char *fname)
 {
   msg_home_replace_attr(fname, 0);
 }
 
-void msg_home_replace_hl(char *fname)
+void msg_home_replace_hl(const char *fname)
 {
   msg_home_replace_attr(fname, HL_ATTR(HLF_D));
 }
 
-static void msg_home_replace_attr(char *fname, int attr)
+static void msg_home_replace_attr(const char *fname, int attr)
 {
   char *name = home_replace_save(NULL, fname);
   msg_outtrans_attr(name, attr);
@@ -1510,7 +1529,7 @@ static void msg_home_replace_attr(char *fname, int attr)
 /// Use attributes 'attr'.
 ///
 /// @return  the number of characters it takes on the screen.
-int msg_outtrans(char *str)
+int msg_outtrans(const char *str)
 {
   return msg_outtrans_attr(str, 0);
 }
@@ -1529,7 +1548,7 @@ int msg_outtrans_len(const char *str, int len)
 /// Handles multi-byte characters.
 ///
 /// @return  pointer to the next character.
-char *msg_outtrans_one(char *p, int attr)
+const char *msg_outtrans_one(const char *p, int attr)
 {
   int l;
 
@@ -1537,7 +1556,7 @@ char *msg_outtrans_one(char *p, int attr)
     msg_outtrans_len_attr(p, l, attr);
     return p + l;
   }
-  msg_puts_attr((const char *)transchar_byte_buf(NULL, (uint8_t)(*p)), attr);
+  msg_puts_attr(transchar_byte_buf(NULL, (uint8_t)(*p)), attr);
   return p + 1;
 }
 
@@ -1557,6 +1576,13 @@ int msg_outtrans_len_attr(const char *msgstr, int len, int attr)
   if (attr & MSG_HIST) {
     add_msg_hist(str, len, attr, false);
     attr &= ~MSG_HIST;
+  }
+
+  // When drawing over the command line no need to clear it later or remove
+  // the mode message.
+  if (msg_row >= cmdline_row && msg_col == 0) {
+    clear_cmdline = false;
+    mode_displayed = false;
   }
 
   // If the string starts with a composing character first draw a space on
@@ -1582,8 +1608,7 @@ int msg_outtrans_len_attr(const char *msgstr, int len, int attr)
           msg_puts_attr_len(plain_start, str - plain_start, attr);
         }
         plain_start = str + mb_l;
-        msg_puts_attr((const char *)transchar_buf(NULL, c),
-                      (attr == 0 ? HL_ATTR(HLF_8) : attr));
+        msg_puts_attr(transchar_buf(NULL, c), attr == 0 ? HL_ATTR(HLF_8) : attr);
         retval += char2cells(c);
       }
       len -= mb_l - 1;
@@ -1616,11 +1641,11 @@ int msg_outtrans_len_attr(const char *msgstr, int len, int attr)
   return retval;
 }
 
-void msg_make(char *arg)
+void msg_make(const char *arg)
 {
   int i;
-  static char *str = "eeffoc";
-  static char *rs = "Plon#dqg#vxjduB";
+  static const char *str = "eeffoc";
+  static const char *rs = "Plon#dqg#vxjduB";
 
   arg = skipwhite(arg);
   for (i = 5; *arg && i >= 0; i--) {
@@ -1777,7 +1802,7 @@ const char *str2special(const char **const sp, const bool replace_spaces, const 
       || c < ' '
       || (replace_spaces && c == ' ')
       || (replace_lt && c == '<')) {
-    return (const char *)get_special_key_name(c, modifiers);
+    return get_special_key_name(c, modifiers);
   }
   buf[0] = (char)c;
   buf[1] = NUL;
@@ -1806,20 +1831,20 @@ void str2specialbuf(const char *sp, char *buf, size_t len)
 }
 
 /// print line for :print or :list command
-void msg_prt_line(char *s, int list)
+void msg_prt_line(const char *s, int list)
 {
   int c;
   int col = 0;
   int n_extra = 0;
   int c_extra = 0;
   int c_final = 0;
-  char *p_extra = NULL;  // init to make SASC shut up
+  const char *p_extra = NULL;  // init to make SASC shut up
   int n;
   int attr = 0;
-  char *lead = NULL;
+  const char *lead = NULL;
   bool in_multispace = false;
   int multispace_pos = 0;
-  char *trail = NULL;
+  const char *trail = NULL;
   int l;
 
   if (curwin->w_p_list) {
@@ -2011,12 +2036,12 @@ void msg_puts_title(const char *s)
 /// Show a message in such a way that it always fits in the line.  Cut out a
 /// part in the middle and replace it with "..." when necessary.
 /// Does not handle multi-byte characters!
-void msg_outtrans_long_attr(char *longstr, int attr)
+void msg_outtrans_long_attr(const char *longstr, int attr)
 {
   msg_outtrans_long_len_attr(longstr, (int)strlen(longstr), attr);
 }
 
-void msg_outtrans_long_len_attr(char *longstr, int len, int attr)
+void msg_outtrans_long_len_attr(const char *longstr, int len, int attr)
 {
   int slen = len;
   int room;
@@ -2657,7 +2682,7 @@ static msgchunk_T *disp_sb_line(int row, msgchunk_T *smp)
 {
   msgchunk_T *mp = smp;
 
-  for (;;) {
+  while (true) {
     msg_row = row;
     msg_col = mp->sb_msg_col;
     char *p = mp->sb_text;
@@ -2802,7 +2827,7 @@ static int do_more_prompt(int typed_char)
   if (typed_char == NUL) {
     msg_moremsg(false);
   }
-  for (;;) {
+  while (true) {
     // Get a typed character directly from the user.
     if (used_typed_char != NUL) {
       c = used_typed_char;              // was typed at hit-enter prompt
@@ -3504,8 +3529,8 @@ void msg_advance(int col)
 /// @param textfiel  IObuff for inputdialog(), NULL otherwise
 /// @param ex_cmd  when true pressing : accepts default and starts Ex command
 /// @returns 0 if cancelled, otherwise the nth button (1-indexed).
-int do_dialog(int type, char *title, char *message, char *buttons, int dfltbutton, char *textfield,
-              int ex_cmd)
+int do_dialog(int type, const char *title, const char *message, const char *buttons, int dfltbutton,
+              const char *textfield, int ex_cmd)
 {
   int retval = 0;
   char *hotkeys;
@@ -3529,7 +3554,7 @@ int do_dialog(int type, char *title, char *message, char *buttons, int dfltbutto
   no_wait_return++;
   hotkeys = msg_show_console_dialog(message, buttons, dfltbutton);
 
-  for (;;) {
+  while (true) {
     // Get a typed character directly from the user.
     int c = get_keystroke(NULL);
     switch (c) {
@@ -3612,7 +3637,7 @@ static int copy_char(const char *from, char *to, bool lowercase)
 ///                        corresponding button has a hotkey
 ///
 /// @return Pointer to memory allocated for storing hotkeys
-static char *console_dialog_alloc(const char *message, char *buttons, bool has_hotkey[])
+static char *console_dialog_alloc(const char *message, const char *buttons, bool has_hotkey[])
 {
   int lenhotkey = HOTK_LEN;  // count first button
   has_hotkey[0] = false;
@@ -3620,7 +3645,7 @@ static char *console_dialog_alloc(const char *message, char *buttons, bool has_h
   // Compute the size of memory to allocate.
   int len = 0;
   int idx = 0;
-  char *r = buttons;
+  const char *r = buttons;
   while (*r) {
     if (*r == DLG_BUTTON_SEP) {
       len += 3;                         // '\n' -> ', '; 'x' -> '(x)'
@@ -3666,7 +3691,7 @@ static char *console_dialog_alloc(const char *message, char *buttons, bool has_h
 /// The hotkeys can be multi-byte characters, but without combining chars.
 ///
 /// @return  an allocated string with hotkeys.
-static char *msg_show_console_dialog(char *message, char *buttons, int dfltbutton)
+static char *msg_show_console_dialog(const char *message, const char *buttons, int dfltbutton)
   FUNC_ATTR_NONNULL_RET
 {
   bool has_hotkey[HAS_HOTKEY_LEN] = { false };
@@ -3686,7 +3711,7 @@ static char *msg_show_console_dialog(char *message, char *buttons, int dfltbutto
 /// @param has_hotkey An element in this array is true if corresponding button
 ///                   has a hotkey
 /// @param[out] hotkeys_ptr Pointer to the memory location where hotkeys will be copied
-static void copy_hotkeys_and_msg(const char *message, char *buttons, int default_button_idx,
+static void copy_hotkeys_and_msg(const char *message, const char *buttons, int default_button_idx,
                                  const bool has_hotkey[], char *hotkeys_ptr)
 {
   *confirm_msg = '\n';
@@ -3709,7 +3734,7 @@ static void copy_hotkeys_and_msg(const char *message, char *buttons, int default
   }
 
   int idx = 0;
-  char *r = buttons;
+  const char *r = buttons;
   while (*r) {
     if (*r == DLG_BUTTON_SEP) {
       *msgp++ = ',';

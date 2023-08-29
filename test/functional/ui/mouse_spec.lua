@@ -3,6 +3,7 @@ local Screen = require('test.functional.ui.screen')
 local clear, feed, meths = helpers.clear, helpers.feed, helpers.meths
 local insert, feed_command = helpers.insert, helpers.feed_command
 local eq, funcs = helpers.eq, helpers.funcs
+local poke_eventloop = helpers.poke_eventloop
 local command = helpers.command
 local exec = helpers.exec
 
@@ -11,8 +12,8 @@ describe('ui/mouse/input', function()
 
   before_each(function()
     clear()
-    meths.set_option('mouse', 'a')
-    meths.set_option('list', true)
+    meths.set_option_value('mouse', 'a', {})
+    meths.set_option_value('list', true, {})
     -- NB: this is weird, but mostly irrelevant to the test
     -- So I didn't bother to change it
     command('set listchars=eol:$')
@@ -32,6 +33,7 @@ describe('ui/mouse/input', function()
       [5] = {bold = true, reverse = true},
       [6] = {foreground = Screen.colors.Grey100, background = Screen.colors.Red},
       [7] = {bold = true, foreground = Screen.colors.SeaGreen4},
+      [8] = {foreground = Screen.colors.Brown},
     })
     command("set mousemodel=extend")
     feed('itesting<cr>mouse<cr>support and selection<esc>')
@@ -64,7 +66,7 @@ describe('ui/mouse/input', function()
   end)
 
   it("in external ui works with unset 'mouse'", function()
-    meths.set_option('mouse', '')
+    meths.set_option_value('mouse', '', {})
     feed('<LeftMouse><2,1>')
     screen:expect{grid=[[
       testing                  |
@@ -379,7 +381,7 @@ describe('ui/mouse/input', function()
     end)
 
     it('left click in default tabline (position 24) closes tab', function()
-      meths.set_option('hidden', true)
+      meths.set_option_value('hidden', true, {})
       feed_command('%delete')
       insert('this is foo')
       feed_command('silent file foo | tabnew | file bar')
@@ -402,7 +404,7 @@ describe('ui/mouse/input', function()
     end)
 
     it('double click in default tabline (position 4) opens new tab', function()
-      meths.set_option('hidden', true)
+      meths.set_option_value('hidden', true, {})
       feed_command('%delete')
       insert('this is foo')
       feed_command('silent file foo | tabnew | file bar')
@@ -437,8 +439,8 @@ describe('ui/mouse/input', function()
             return call('Test', a:000 + [2])
           endfunction
         ]])
-        meths.set_option('tabline', '%@Test@test%X-%5@Test2@test2')
-        meths.set_option('showtabline', 2)
+        meths.set_option_value('tabline', '%@Test@test%X-%5@Test2@test2', {})
+        meths.set_option_value('showtabline', 2, {})
         screen:expect([[
           {fill:test-test2               }|
           testing                  |
@@ -786,16 +788,76 @@ describe('ui/mouse/input', function()
   end)
 
   it('ctrl + left click will search for a tag', function()
-    meths.set_option('tags', './non-existent-tags-file')
+    meths.set_option_value('tags', './non-existent-tags-file', {})
     feed('<C-LeftMouse><0,0>')
     screen:expect([[
       {6:E433: No tags file}       |
-      {6:E426: tag not found: test}|
+      {6:E426: Tag not found: test}|
       {6:ing}                      |
       {7:Press ENTER or type comma}|
       {7:nd to continue}^           |
     ]])
     feed('<cr>')
+  end)
+
+  it('dragging vertical separator', function()
+    screen:try_resize(45, 5)
+    command('setlocal nowrap')
+    local oldwin = meths.get_current_win().id
+    command('rightbelow vnew')
+    screen:expect([[
+      testing               │{0:^$}                     |
+      mouse                 │{0:~                     }|
+      support and selection │{0:~                     }|
+      {4:[No Name] [+]          }{5:[No Name]             }|
+                                                   |
+    ]])
+    meths.input_mouse('left', 'press', '', 0, 0, 22)
+    poke_eventloop()
+    meths.input_mouse('left', 'drag', '', 0, 1, 12)
+    screen:expect([[
+      testing     │{0:^$}                               |
+      mouse       │{0:~                               }|
+      support and │{0:~                               }|
+      {4:< Name] [+]  }{5:[No Name]                       }|
+                                                   |
+    ]])
+    meths.input_mouse('left', 'drag', '', 0, 2, 2)
+    screen:expect([[
+      te│{0:^$}                                         |
+      mo│{0:~                                         }|
+      su│{0:~                                         }|
+      {4:<  }{5:[No Name]                                 }|
+                                                   |
+    ]])
+    meths.input_mouse('left', 'release', '', 0, 2, 2)
+    meths.set_option_value('statuscolumn', 'foobar', { win = oldwin })
+    screen:expect([[
+      {8:fo}│{0:^$}                                         |
+      {8:fo}│{0:~                                         }|
+      {8:fo}│{0:~                                         }|
+      {4:<  }{5:[No Name]                                 }|
+                                                   |
+    ]])
+    meths.input_mouse('left', 'press', '', 0, 0, 2)
+    poke_eventloop()
+    meths.input_mouse('left', 'drag', '', 0, 1, 12)
+    screen:expect([[
+      {8:foobar}testin│{0:^$}                               |
+      {8:foobar}mouse │{0:~                               }|
+      {8:foobar}suppor│{0:~                               }|
+      {4:< Name] [+]  }{5:[No Name]                       }|
+                                                   |
+    ]])
+    meths.input_mouse('left', 'drag', '', 0, 2, 22)
+    screen:expect([[
+      {8:foobar}testing         │{0:^$}                     |
+      {8:foobar}mouse           │{0:~                     }|
+      {8:foobar}support and sele│{0:~                     }|
+      {4:[No Name] [+]          }{5:[No Name]             }|
+                                                   |
+    ]])
+    meths.input_mouse('left', 'release', '', 0, 2, 22)
   end)
 
   local function wheel(use_api)
@@ -1011,37 +1073,7 @@ describe('ui/mouse/input', function()
     ]])
   end)
 
-  describe('on concealed text', function()
-    -- Helpful for reading the test expectations:
-    -- :match Error /\^/
-
-    before_each(function()
-      screen:try_resize(25, 7)
-      screen:set_default_attr_ids({
-        [0] = {bold=true, foreground=Screen.colors.Blue},
-        c = { foreground = Screen.colors.LightGrey, background = Screen.colors.DarkGray },
-        sm = {bold = true},
-      })
-      feed('ggdG')
-
-      feed_command('set concealcursor=ni')
-      feed_command('set nowrap')
-      feed_command('set shiftwidth=2 tabstop=4 list')
-      feed_command('setl listchars=tab:>-')
-      feed_command('syntax match NonText "\\*" conceal')
-      feed_command('syntax match NonText "cats" conceal cchar=X')
-      feed_command('syntax match NonText "x" conceal cchar=>')
-
-      -- First column is there to retain the tabs.
-      insert([[
-      |Section				*t1*
-      |			  *t2* *t3* *t4*
-      |x 私は猫が大好き	*cats* ✨🐈✨
-      ]])
-
-      feed('gg<c-v>Gxgg')
-    end)
-
+  local function test_mouse_click_conceal()
     it('(level 1) click on non-wrapped lines', function()
       feed_command('let &conceallevel=1', 'echo')
 
@@ -1433,7 +1465,6 @@ describe('ui/mouse/input', function()
       ]])
     end) -- level 2 - wrapped
 
-
     it('(level 3) click on non-wrapped lines', function()
       feed_command('let &conceallevel=3', 'echo')
 
@@ -1471,6 +1502,7 @@ describe('ui/mouse/input', function()
       ]])
 
       feed('<esc><LeftMouse><20,2>')
+      feed('zH')  -- FIXME: unnecessary horizontal scrolling
       screen:expect([[
         Section{0:>>--->--->---}t1   |
         {0:>--->--->---}  t2 t3 t4   |
@@ -1574,12 +1606,80 @@ describe('ui/mouse/input', function()
       ]])
 
     end) -- level 3 - wrapped
+  end
+
+  describe('on concealed text', function()
+    -- Helpful for reading the test expectations:
+    -- :match Error /\^/
+
+    before_each(function()
+      screen:try_resize(25, 7)
+      screen:set_default_attr_ids({
+        [0] = { bold = true, foreground = Screen.colors.Blue },
+        c = { foreground = Screen.colors.LightGrey, background = Screen.colors.DarkGray },
+        sm = { bold = true },
+      })
+      feed('ggdG')
+
+      command([[setlocal concealcursor=ni nowrap shiftwidth=2 tabstop=4 list listchars=tab:>-]])
+      command([[highlight link X0 Normal]])
+      command([[highlight link X1 NonText]])
+      command([[highlight link X2 NonText]])
+      command([[highlight link X3 NonText]])
+
+      -- First column is there to retain the tabs.
+      insert([[
+      |Section				*t1*
+      |			  *t2* *t3* *t4*
+      |x 私は猫が大好き	*cats* ✨🐈✨
+      ]])
+
+      feed('gg<c-v>Gxgg')
+    end)
+
+    describe('(syntax)', function()
+      before_each(function()
+        command([[syntax region X0 matchgroup=X1 start=/\*/ end=/\*/ concealends contains=X2]])
+        command([[syntax match X2 /cats/ conceal cchar=X contained]])
+        command([[syntax match X3 /\n\@<=x/ conceal cchar=>]])
+      end)
+      test_mouse_click_conceal()
+    end)
+
+    describe('(matchadd())', function()
+      before_each(function()
+        funcs.matchadd('Conceal', [[\*]])
+        funcs.matchadd('Conceal', [[cats]], 10, -1, { conceal = 'X' })
+        funcs.matchadd('Conceal', [[\n\@<=x]], 10, -1, { conceal = '>' })
+      end)
+      test_mouse_click_conceal()
+    end)
+
+    describe('(extmarks)', function()
+      before_each(function()
+        local ns = meths.create_namespace('conceal')
+        meths.buf_set_extmark(0, ns, 0, 11, { end_col = 12, conceal = '' })
+        meths.buf_set_extmark(0, ns, 0, 14, { end_col = 15, conceal = '' })
+        meths.buf_set_extmark(0, ns, 1, 5, { end_col = 6, conceal = '' })
+        meths.buf_set_extmark(0, ns, 1, 8, { end_col = 9, conceal = '' })
+        meths.buf_set_extmark(0, ns, 1, 10, { end_col = 11, conceal = '' })
+        meths.buf_set_extmark(0, ns, 1, 13, { end_col = 14, conceal = '' })
+        meths.buf_set_extmark(0, ns, 1, 15, { end_col = 16, conceal = '' })
+        meths.buf_set_extmark(0, ns, 1, 18, { end_col = 19, conceal = '' })
+        meths.buf_set_extmark(0, ns, 2, 24, { end_col = 25, conceal = '' })
+        meths.buf_set_extmark(0, ns, 2, 29, { end_col = 30, conceal = '' })
+        meths.buf_set_extmark(0, ns, 2, 25, { end_col = 29, conceal = 'X' })
+        meths.buf_set_extmark(0, ns, 2, 0, { end_col = 1, conceal = '>' })
+      end)
+      test_mouse_click_conceal()
+    end)
+
   end)
 
   it('getmousepos works correctly', function()
-    local winwidth = meths.get_option('winwidth')
+    local winwidth = meths.get_option_value('winwidth', {})
     -- Set winwidth=1 so that window sizes don't change.
-    meths.set_option('winwidth', 1)
+    meths.set_option_value('winwidth', 1, {})
     command('tabedit')
     local tabpage = meths.get_current_tabpage()
     insert('hello')
@@ -1597,8 +1697,8 @@ describe('ui/mouse/input', function()
     }
     local float = meths.open_win(meths.get_current_buf(), false, opts)
     command('redraw')
-    local lines = meths.get_option('lines')
-    local columns = meths.get_option('columns')
+    local lines = meths.get_option_value('lines', {})
+    local columns = meths.get_option_value('columns', {})
 
     -- Test that screenrow and screencol are set properly for all positions.
     for row = 0, lines - 1 do
@@ -1696,7 +1796,7 @@ describe('ui/mouse/input', function()
 
     -- Restore state and release mouse.
     command('tabclose!')
-    meths.set_option('winwidth', winwidth)
+    meths.set_option_value('winwidth', winwidth, {})
     meths.input_mouse('left', 'release', '', 0, 0, 0)
   end)
 
@@ -1840,16 +1940,6 @@ describe('ui/mouse/input', function()
     eq({2, 9}, meths.win_get_cursor(0))
     eq('', funcs.getreg('"'))
 
-    -- Try clicking on the status line
-    funcs.setreg('"', '')
-    meths.win_set_cursor(0, {1, 9})
-    feed('vee')
-    meths.input_mouse('right', 'press', '', 0, 5, 1)
-    meths.input_mouse('right', 'release', '', 0, 5, 1)
-    feed('<Down><CR>')
-    eq({1, 9}, meths.win_get_cursor(0))
-    eq('ran away', funcs.getreg('"'))
-
     -- Try clicking outside the window
     funcs.setreg('"', '')
     meths.win_set_cursor(0, {2, 1})
@@ -1859,5 +1949,28 @@ describe('ui/mouse/input', function()
     feed('<Down><CR>')
     eq(2, funcs.winnr())
     eq('', funcs.getreg('"'))
+
+    -- Test for right click in visual mode inside the selection with vertical splits
+    command('wincmd t')
+    command('rightbelow vsplit')
+    funcs.setreg('"', '')
+    meths.win_set_cursor(0, {1, 9})
+    feed('vee')
+    meths.input_mouse('right', 'press', '', 0, 0, 52)
+    meths.input_mouse('right', 'release', '', 0, 0, 52)
+    feed('<Down><CR>')
+    eq({1, 9}, meths.win_get_cursor(0))
+    eq('ran away', funcs.getreg('"'))
+
+    -- Test for right click inside visual selection at bottom of window with winbar
+    command('setlocal winbar=WINBAR')
+    feed('2yyP')
+    funcs.setreg('"', '')
+    feed('G$vbb')
+    meths.input_mouse('right', 'press', '', 0, 4, 61)
+    meths.input_mouse('right', 'release', '', 0, 4, 61)
+    feed('<Down><CR>')
+    eq({4, 20}, meths.win_get_cursor(0))
+    eq('the moon', funcs.getreg('"'))
   end)
 end)

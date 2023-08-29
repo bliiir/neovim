@@ -17,14 +17,14 @@ local sleep = helpers.sleep
 local funcs = helpers.funcs
 local is_os = helpers.is_os
 local skip = helpers.skip
+local nvim_prog = helpers.nvim_prog
 
 describe(':terminal buffer', function()
   local screen
 
   before_each(function()
     clear()
-    feed_command('set modifiable swapfile undolevels=20')
-    poke_eventloop()
+    command('set modifiable swapfile undolevels=20')
     screen = thelpers.screen_setup()
   end)
 
@@ -197,8 +197,7 @@ describe(':terminal buffer', function()
 
   it('handles loss of focus gracefully', function()
     -- Change the statusline to avoid printing the file name, which varies.
-    nvim('set_option', 'statusline', '==========')
-    feed_command('set laststatus=0')
+    nvim('set_option_value', 'statusline', '==========', {})
 
     -- Save the buffer number of the terminal for later testing.
     local tbuf = eval('bufnr("%")')
@@ -231,8 +230,6 @@ describe(':terminal buffer', function()
     neq(tbuf, eval('bufnr("%")'))
     feed_command('quit!')  -- Should exit the new window, not the terminal.
     eq(tbuf, eval('bufnr("%")'))
-
-    feed_command('set laststatus=1')  -- Restore laststatus to the default.
   end)
 
   it('term_close() use-after-free #4393', function()
@@ -281,6 +278,7 @@ describe(':terminal buffer', function()
   end)
 
   it('requires bang (!) to close a running job #15402', function()
+    skip(is_os('win'), "Test freezes the CI and makes it time out")
     eq('Vim(wqall):E948: Job still running', exc_exec('wqall'))
     for _, cmd in ipairs({ 'bdelete', '%bdelete', 'bwipeout', 'bunload' }) do
       matches('^Vim%('..cmd:gsub('%%', '')..'%):E89: term://.*tty%-test.* will be killed %(add %! to override%)$',
@@ -412,14 +410,6 @@ describe('on_lines does not emit out-of-bounds line indexes when', function()
     feed_command('bdelete!')
     eq('', exec_lua([[return _G.cb_error]]))
   end)
-
-  it('runs TextChangedT event', function()
-    meths.set_var('called', 0)
-    command('autocmd TextChangedT * ++once let g:called = 1')
-    feed_command('terminal')
-    feed('iaa')
-    eq(1, meths.get_var('called'))
-  end)
 end)
 
 it('terminal truncates number of composing characters to 5', function()
@@ -428,6 +418,62 @@ it('terminal truncates number of composing characters to 5', function()
   local composing = ('a̳'):sub(2)
   meths.chan_send(chan, 'a' .. composing:rep(8))
   retry(nil, nil, function() eq('a' .. composing:rep(5), meths.get_current_line()) end)
+end)
+
+describe('terminal input', function()
+  before_each(function()
+    clear()
+    exec_lua([[
+      _G.input_data = ''
+      vim.api.nvim_open_term(0, { on_input = function(_, _, _, data)
+        _G.input_data = _G.input_data .. data
+      end })
+    ]])
+    feed('i')
+    poke_eventloop()
+  end)
+
+  it('<C-Space> is sent as NUL byte', function()
+    feed('aaa<C-Space>bbb')
+    eq('aaa\0bbb', exec_lua([[return _G.input_data]]))
+  end)
+
+  it('unknown special keys are not sent', function()
+    feed('aaa<Help>bbb')
+    eq('aaabbb', exec_lua([[return _G.input_data]]))
+  end)
+end)
+
+describe('terminal input', function()
+  it('sends various special keys with modifiers', function()
+    clear()
+    local screen = thelpers.screen_setup(0,
+      string.format([=[["%s", "-u", "NONE", "-i", "NONE", "--cmd", "startinsert"]]=], nvim_prog))
+    screen:expect{grid=[[
+      {1: }                                                 |
+      {4:~                                                 }|
+      {4:~                                                 }|
+      {4:~                                                 }|
+      {5:[No Name]                       0,1            All}|
+      {3:-- INSERT --}                                      |
+      {3:-- TERMINAL --}                                    |
+    ]]}
+    for _, key in ipairs({
+      '<M-Tab>', '<M-CR>', '<M-Esc>',
+      '<BS>', '<S-Tab>', '<Insert>', '<Del>', '<PageUp>', '<PageDown>',
+      '<S-Up>', '<C-Up>', '<Up>', '<S-Down>', '<C-Down>', '<Down>',
+      '<S-Left>', '<C-Left>', '<Left>', '<S-Right>', '<C-Right>', '<Right>',
+      '<S-Home>', '<C-Home>', '<Home>', '<S-End>', '<C-End>', '<End>',
+      '<C-LeftMouse>', '<C-LeftRelease>', '<2-LeftMouse>', '<2-LeftRelease>',
+      '<S-RightMouse>', '<S-RightRelease>', '<2-RightMouse>', '<2-RightRelease>',
+      '<M-MiddleMouse>', '<M-MiddleRelease>', '<2-MiddleMouse>', '<2-MiddleRelease>',
+      '<S-ScrollWheelUp>', '<S-ScrollWheelDown>', '<ScrollWheelUp>', '<ScrollWheelDown>',
+      '<S-ScrollWheelLeft>', '<S-ScrollWheelRight>', '<ScrollWheelLeft>', '<ScrollWheelRight>',
+    }) do
+      feed('<CR><C-V>' .. key)
+      retry(nil, nil, function() eq(key, meths.get_current_line()) end)
+    end
+  end)
 end)
 
 if is_os('win') then
@@ -497,3 +543,17 @@ if is_os('win') then
     end)
   end)
 end
+
+describe('termopen()', function()
+  before_each(clear)
+
+  it('disallowed when textlocked and in cmdwin buffer', function()
+    command("autocmd TextYankPost <buffer> ++once call termopen('foo')")
+    matches("Vim%(call%):E565: Not allowed to change text or change window$",
+      pcall_err(command, "normal! yy"))
+
+    feed("q:")
+    eq("Vim:E11: Invalid in command-line window; <CR> executes, CTRL-C quits",
+      pcall_err(funcs.termopen, "bar"))
+  end)
+end)

@@ -201,7 +201,7 @@ bool hasFoldingWin(win_T *const win, const linenr_T lnum, linenr_T *const firstp
   if (first == 0) {
     // Recursively search for a fold that contains "lnum".
     garray_T *gap = &win->w_folds;
-    for (;;) {
+    while (true) {
       if (!foldFind(gap, lnum_rel, &fp)) {
         break;
       }
@@ -430,7 +430,7 @@ void foldOpenCursor(void)
 {
   checkupdate(curwin);
   if (hasAnyFolding(curwin)) {
-    for (;;) {
+    while (true) {
       int done = DONE_NOTHING;
       (void)setManualFold(curwin->w_cursor, true, false, &done);
       if (!(done & DONE_ACTION)) {
@@ -562,7 +562,7 @@ void foldCreate(win_T *wp, pos_T start, pos_T end)
     i = 0;
   } else {
     fold_T *fp;
-    for (;;) {
+    while (true) {
       if (!foldFind(gap, start_rel.lnum, &fp)) {
         break;
       }
@@ -683,7 +683,7 @@ void deleteFold(win_T *const wp, const linenr_T start, const linenr_T end, const
     garray_T *found_ga = NULL;
     linenr_T lnum_off = 0;
     bool use_level = false;
-    for (;;) {
+    while (true) {
       fold_T *fp;
       if (!foldFind(gap, lnum - lnum_off, &fp)) {
         break;
@@ -743,8 +743,7 @@ void deleteFold(win_T *const wp, const linenr_T start, const linenr_T end, const
   }
 
   if (last_lnum > 0) {
-    // TODO(teto): pass the buffer
-    changed_lines(first_lnum, (colnr_T)0, last_lnum, 0L, false);
+    changed_lines(wp->w_buffer, first_lnum, (colnr_T)0, last_lnum, 0L, false);
 
     // send one nvim_buf_lines_event at the end
     // last_lnum is the line *after* the last line of the outermost fold
@@ -771,7 +770,7 @@ void clearFolding(win_T *win)
 /// The changes in lines from top to bot (inclusive).
 void foldUpdate(win_T *wp, linenr_T top, linenr_T bot)
 {
-  if (disable_fold_update || State & MODE_INSERT) {
+  if (disable_fold_update || (State & MODE_INSERT && !foldmethodIsIndent(wp))) {
     return;
   }
 
@@ -865,7 +864,7 @@ int foldMoveTo(const bool updown, const int dir, const long count)
     linenr_T lnum_found = curwin->w_cursor.lnum;
     int level = 0;
     bool last = false;
-    for (;;) {
+    while (true) {
       if (!foldFind(gap, curwin->w_cursor.lnum - lnum_off, &fp)) {
         if (!updown || gap->ga_len == 0) {
           break;
@@ -1104,7 +1103,7 @@ static int foldLevelWin(win_T *wp, linenr_T lnum)
 
   // Recursively search for a fold that contains "lnum".
   garray_T *gap = &wp->w_folds;
-  for (;;) {
+  while (true) {
     if (!foldFind(gap, lnum_rel, &fp)) {
       break;
     }
@@ -1201,7 +1200,7 @@ static linenr_T setManualFoldWin(win_T *wp, linenr_T lnum, int opening, int recu
 
   // Find the fold, open or close it.
   garray_T *gap = &wp->w_folds;
-  for (;;) {
+  while (true) {
     if (!foldFind(gap, lnum, &fp)) {
       // If there is a following fold, continue there next time.
       if (fp != NULL && fp < (fold_T *)gap->ga_data + gap->ga_len) {
@@ -1580,8 +1579,7 @@ static void foldCreateMarkers(win_T *wp, pos_T start, pos_T end)
 
   // Update both changes here, to avoid all folds after the start are
   // changed when the start marker is inserted and the end isn't.
-  // TODO(teto): pass the buffer
-  changed_lines(start.lnum, (colnr_T)0, end.lnum, 0L, false);
+  changed_lines(buf, start.lnum, (colnr_T)0, end.lnum, 0L, false);
 
   // Note: foldAddMarker() may not actually change start and/or end if
   // u_save() is unable to save the buffer line, but we send the
@@ -1601,7 +1599,7 @@ static void foldAddMarker(buf_T *buf, pos_T pos, const char *marker, size_t mark
   linenr_T lnum = pos.lnum;
 
   // Allocate a new line: old-line + 'cms'-start + marker + 'cms'-end
-  char *line = ml_get_buf(buf, lnum, false);
+  char *line = ml_get_buf(buf, lnum);
   size_t line_len = strlen(line);
   size_t added = 0;
 
@@ -1661,7 +1659,7 @@ static void foldDelMarker(buf_T *buf, linenr_T lnum, char *marker, size_t marker
   }
 
   char *cms = buf->b_p_cms;
-  char *line = ml_get_buf(buf, lnum, false);
+  char *line = ml_get_buf(buf, lnum);
   for (char *p = line; *p != NUL; p++) {
     if (strncmp(p, marker, markerlen) != 0) {
       continue;
@@ -1742,15 +1740,19 @@ char *get_foldtext(win_T *wp, linenr_T lnum, linenr_T lnume, foldinfo_T foldinfo
     set_vim_var_string(VV_FOLDDASHES, dashes, -1);
     set_vim_var_nr(VV_FOLDLEVEL, (varnumber_T)level);
 
-    // skip evaluating foldtext on errors
+    // skip evaluating 'foldtext' on errors
     if (!got_fdt_error) {
-      win_T *save_curwin = curwin;
+      win_T *const save_curwin = curwin;
+      const sctx_T saved_sctx = current_sctx;
+
       curwin = wp;
       curbuf = wp->w_buffer;
+      current_sctx = wp->w_p_script_ctx[WV_FDT].script_ctx;
 
-      emsg_silent++;       // handle exceptions, but don't display errors
-      text = eval_to_string_safe(wp->w_p_fdt, NULL, was_set_insecurely(wp, "foldtext", OPT_LOCAL));
-      emsg_silent--;
+      emsg_off++;  // handle exceptions, but don't display errors
+      text = eval_to_string_safe(wp->w_p_fdt,
+                                 was_set_insecurely(wp, "foldtext", OPT_LOCAL));
+      emsg_off--;
 
       if (text == NULL || did_emsg) {
         got_fdt_error = true;
@@ -1758,6 +1760,7 @@ char *get_foldtext(win_T *wp, linenr_T lnum, linenr_T lnume, foldinfo_T foldinfo
 
       curwin = save_curwin;
       curbuf = curwin->w_buffer;
+      current_sctx = saved_sctx;
     }
     last_lnum = lnum;
     last_wp   = wp;
@@ -1786,7 +1789,7 @@ char *get_foldtext(win_T *wp, linenr_T lnum, linenr_T lnume, foldinfo_T foldinfo
         }
       }
       if (*p != NUL) {
-        p = transstr((const char *)text, true);
+        p = transstr(text, true);
         xfree(text);
         text = p;
       }
@@ -2504,7 +2507,7 @@ static linenr_T foldUpdateIEMSRecurse(garray_T *const gap, const int level,
   }
 
   // delete following folds that end before the current line
-  for (;;) {
+  while (true) {
     fp2 = fp + 1;
     if (fp2 >= (fold_T *)gap->ga_data + gap->ga_len
         || fp2->fd_top > flp->lnum) {
@@ -2869,7 +2872,7 @@ static void foldlevelIndent(fline_T *flp)
   linenr_T lnum = flp->lnum + flp->off;
 
   buf_T *buf = flp->wp->w_buffer;
-  char *s = skipwhite(ml_get_buf(buf, lnum, false));
+  char *s = skipwhite(ml_get_buf(buf, lnum));
 
   // empty line or lines starting with a character in 'foldignore': level
   // depends on surrounding lines
@@ -3031,7 +3034,7 @@ static void foldlevelMarker(fline_T *flp)
   flp->start = 0;
   flp->lvl_next = flp->lvl;
 
-  char *s = ml_get_buf(flp->wp->w_buffer, flp->lnum + flp->off, false);
+  char *s = ml_get_buf(flp->wp->w_buffer, flp->lnum + flp->off);
   while (*s) {
     if (*s == cstart
         && strncmp(s + 1, startmarker, foldstartmarkerlen - 1) == 0) {

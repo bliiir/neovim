@@ -87,6 +87,9 @@ Integer nvim_get_hl_id_by_name(String name)
 
 /// Gets all or specific highlight groups in a namespace.
 ///
+/// @note When the `link` attribute is defined in the highlight definition
+///       map, other attributes will not be taking effect (see |:hi-link|).
+///
 /// @param ns_id Get highlight groups for namespace ns_id |nvim_get_namespaces()|.
 ///              Use 0 to get global highlight groups |:highlight|.
 /// @param opts  Options dict:
@@ -97,9 +100,6 @@ Integer nvim_get_hl_id_by_name(String name)
 /// @param[out] err Error details, if any.
 /// @return Highlight groups as a map from group name to a highlight definition map as in |nvim_set_hl()|,
 ///                   or only a single highlight definition map if requested by name or id.
-///
-/// @note When the `link` attribute is defined in the highlight definition
-///       map, other attributes will not be taking effect (see |:hi-link|).
 Dictionary nvim_get_hl(Integer ns_id, Dict(get_highlight) *opts, Arena *arena, Error *err)
   FUNC_API_SINCE(11)
 {
@@ -305,6 +305,7 @@ void nvim_feedkeys(String keys, String mode, Boolean escape_ks)
 Integer nvim_input(String keys)
   FUNC_API_SINCE(1) FUNC_API_FAST
 {
+  may_trigger_vim_suspend_resume(false);
   return (Integer)input_enqueue(keys);
 }
 
@@ -334,6 +335,8 @@ void nvim_input_mouse(String button, String action, String modifier, Integer gri
                       Integer col, Error *err)
   FUNC_API_SINCE(6) FUNC_API_FAST
 {
+  may_trigger_vim_suspend_resume(false);
+
   if (button.data == NULL || action.data == NULL) {
     goto error;
   }
@@ -428,7 +431,7 @@ String nvim_replace_termcodes(String str, Boolean from_part, Boolean do_lt, Bool
   }
 
   char *ptr = NULL;
-  replace_termcodes(str.data, str.size, &ptr, flags, NULL, CPO_TO_CPO_FLAGS);
+  replace_termcodes(str.data, str.size, &ptr, 0, flags, NULL, CPO_TO_CPO_FLAGS);
   return cstr_as_string(ptr);
 }
 
@@ -487,7 +490,7 @@ Integer nvim_strwidth(String text, Error *err)
   return (Integer)mb_string2cells(text.data);
 }
 
-/// Gets the paths contained in 'runtimepath'.
+/// Gets the paths contained in |runtime-search-path|.
 ///
 /// @return List of paths
 ArrayOf(String) nvim_list_runtime_paths(Error *err)
@@ -527,12 +530,17 @@ ArrayOf(String) nvim_get_runtime_file(String name, Boolean all, Error *err)
   return rv;
 }
 
-static void find_runtime_cb(char *fname, void *cookie)
+static bool find_runtime_cb(int num_fnames, char **fnames, bool all, void *cookie)
 {
   Array *rv = (Array *)cookie;
-  if (fname != NULL) {
-    ADD(*rv, STRING_OBJ(cstr_to_string(fname)));
+  for (int i = 0; i < num_fnames; i++) {
+    ADD(*rv, CSTR_TO_OBJ(fnames[i]));
+    if (!all) {
+      return true;
+    }
   }
+
+  return num_fnames > 0;
 }
 
 String nvim__get_lib_dir(void)
@@ -544,22 +552,21 @@ String nvim__get_lib_dir(void)
 ///
 /// @param pat pattern of files to search for
 /// @param all whether to return all matches or only the first
-/// @param opts is_lua: only search lua subdirs
+/// @param opts is_lua: only search Lua subdirs
 /// @return list of absolute paths to the found files
 ArrayOf(String) nvim__get_runtime(Array pat, Boolean all, Dict(runtime) *opts, Error *err)
   FUNC_API_SINCE(8)
   FUNC_API_FAST
 {
-  bool is_lua = api_object_to_bool(opts->is_lua, "is_lua", false, err);
-  bool source = api_object_to_bool(opts->do_source, "do_source", false, err);
-  VALIDATE((!source || nlua_is_deferred_safe()), "%s", "'do_source' used in fast callback", {});
+  VALIDATE((!opts->do_source || nlua_is_deferred_safe()), "%s", "'do_source' used in fast callback",
+           {});
   if (ERROR_SET(err)) {
     return (Array)ARRAY_DICT_INIT;
   }
 
-  ArrayOf(String) res = runtime_get_named(is_lua, pat, all);
+  ArrayOf(String) res = runtime_get_named(opts->is_lua, pat, all);
 
-  if (source) {
+  if (opts->do_source) {
     for (size_t i = 0; i < res.size; i++) {
       String name = res.items[i].data.string;
       (void)do_source(name.data, false, DOSO_NONE, NULL);
@@ -612,7 +619,7 @@ String nvim_get_current_line(Error *err)
 /// @param[out] err Error details, if any
 void nvim_set_current_line(String line, Error *err)
   FUNC_API_SINCE(1)
-  FUNC_API_CHECK_TEXTLOCK
+  FUNC_API_TEXTLOCK_ALLOW_CMDWIN
 {
   buffer_set_line(curbuf->handle, curwin->w_cursor.lnum - 1, line, err);
 }
@@ -622,7 +629,7 @@ void nvim_set_current_line(String line, Error *err)
 /// @param[out] err Error details, if any
 void nvim_del_current_line(Error *err)
   FUNC_API_SINCE(1)
-  FUNC_API_CHECK_TEXTLOCK
+  FUNC_API_TEXTLOCK_ALLOW_CMDWIN
 {
   buffer_del_line(curbuf->handle, curwin->w_cursor.lnum - 1, err);
 }
@@ -710,15 +717,13 @@ void nvim_echo(Array chunks, Boolean history, Dict(echo_opts) *opts, Error *err)
     goto error;
   }
 
-  bool verbose = api_object_to_bool(opts->verbose, "verbose", false, err);
-
-  if (verbose) {
+  if (opts->verbose) {
     verbose_enter();
   }
 
   msg_multiattr(hl_msg, history ? "echomsg" : "echo", history);
 
-  if (verbose) {
+  if (opts->verbose) {
     verbose_leave();
     verbose_stop();  // flush now
   }
@@ -803,7 +808,7 @@ Buffer nvim_get_current_buf(void)
 /// @param[out] err Error details, if any
 void nvim_set_current_buf(Buffer buffer, Error *err)
   FUNC_API_SINCE(1)
-  FUNC_API_CHECK_TEXTLOCK
+  FUNC_API_TEXTLOCK
 {
   buf_T *buf = find_buffer_by_handle(buffer, err);
 
@@ -858,7 +863,7 @@ Window nvim_get_current_win(void)
 /// @param[out] err Error details, if any
 void nvim_set_current_win(Window window, Error *err)
   FUNC_API_SINCE(1)
-  FUNC_API_CHECK_TEXTLOCK
+  FUNC_API_TEXTLOCK
 {
   win_T *win = find_window_by_handle(window, err);
 
@@ -907,14 +912,17 @@ Buffer nvim_create_buf(Boolean listed, Boolean scratch, Error *err)
     goto fail;
   }
 
+  // Only strictly needed for scratch, but could just as well be consistent
+  // and do this now. buffer is created NOW, not when it latter first happen
+  // to reach a window or aucmd_prepbuf() ..
+  buf_copy_options(buf, BCO_ENTER | BCO_NOHELP);
+
   if (scratch) {
-    aco_save_T aco;
-    aucmd_prepbuf(&aco, buf);
-    set_option_value("bufhidden", 0L, "hide", OPT_LOCAL);
-    set_option_value("buftype", 0L, "nofile", OPT_LOCAL);
-    set_option_value("swapfile", 0L, NULL, OPT_LOCAL);
-    set_option_value("modeline", 0L, NULL, OPT_LOCAL);  // 'nomodeline'
-    aucmd_restbuf(&aco);
+    set_string_option_direct_in_buf(buf, "bufhidden", -1, "hide", OPT_LOCAL, 0);
+    set_string_option_direct_in_buf(buf, "buftype", -1, "nofile", OPT_LOCAL, 0);
+    assert(buf->b_ml.ml_mfp->mf_fd < 0);  // ml_open() should not have opened swapfile already
+    buf->b_p_swf = false;
+    buf->b_p_ml = false;
   }
   return buf->b_fnum;
 
@@ -941,7 +949,7 @@ fail:
 ///
 /// @param buffer the buffer to use (expected to be empty)
 /// @param opts   Optional parameters.
-///          - on_input: lua callback for input sent, i e keypresses in terminal
+///          - on_input: Lua callback for input sent, i e keypresses in terminal
 ///            mode. Note: keypresses are sent raw as they would be to the pty
 ///            master end. For instance, a carriage return is sent
 ///            as a "\r", not as a "\n". |textlock| applies. It is possible
@@ -951,9 +959,15 @@ fail:
 /// @return Channel id, or 0 on error
 Integer nvim_open_term(Buffer buffer, DictionaryOf(LuaRef) opts, Error *err)
   FUNC_API_SINCE(7)
+  FUNC_API_TEXTLOCK_ALLOW_CMDWIN
 {
   buf_T *buf = find_buffer_by_handle(buffer, err);
   if (!buf) {
+    return 0;
+  }
+
+  if (cmdwin_type != 0 && buf == curbuf) {
+    api_set_error(err, kErrorTypeException, "%s", e_cmdwin);
     return 0;
   }
 
@@ -1009,7 +1023,7 @@ static void term_write(char *buf, size_t size, void *data)  // NOLINT(readabilit
 
 static void term_resize(uint16_t width, uint16_t height, void *data)
 {
-  // TODO(bfredl): lua callback
+  // TODO(bfredl): Lua callback
 }
 
 static void term_close(void *data)
@@ -1084,7 +1098,7 @@ Tabpage nvim_get_current_tabpage(void)
 /// @param[out] err Error details, if any
 void nvim_set_current_tabpage(Tabpage tabpage, Error *err)
   FUNC_API_SINCE(1)
-  FUNC_API_CHECK_TEXTLOCK
+  FUNC_API_TEXTLOCK
 {
   tabpage_T *tp = find_tab_by_handle(tabpage, err);
 
@@ -1126,7 +1140,7 @@ void nvim_set_current_tabpage(Tabpage tabpage, Error *err)
 ///     - false: Client must cancel the paste.
 Boolean nvim_paste(String data, Boolean crlf, Integer phase, Error *err)
   FUNC_API_SINCE(6)
-  FUNC_API_CHECK_TEXTLOCK
+  FUNC_API_TEXTLOCK_ALLOW_CMDWIN
 {
   static bool draining = false;
   bool cancel = false;
@@ -1197,7 +1211,7 @@ theend:
 /// @param[out] err Error details, if any
 void nvim_put(ArrayOf(String) lines, String type, Boolean after, Boolean follow, Error *err)
   FUNC_API_SINCE(6)
-  FUNC_API_CHECK_TEXTLOCK
+  FUNC_API_TEXTLOCK_ALLOW_CMDWIN
 {
   yankreg_T *reg = xcalloc(1, sizeof(yankreg_T));
   VALIDATE_S((prepare_yankreg_from_object(reg, type, lines.size)), "type", type.data, {
@@ -1309,11 +1323,8 @@ Dictionary nvim_get_context(Dict(context) *opts, Error *err)
   FUNC_API_SINCE(6)
 {
   Array types = ARRAY_DICT_INIT;
-  if (HAS_KEY(opts->types)) {
-    VALIDATE_T("types", kObjectTypeArray, opts->types.type, {
-      return (Dictionary)ARRAY_DICT_INIT;
-    });
-    types = opts->types.data.array;
+  if (HAS_KEY(opts, context, types)) {
+    types = opts->types;
   }
 
   int int_types = types.size > 0 ? 0 : kCtxAll;
@@ -1383,7 +1394,7 @@ Dictionary nvim_get_mode(void)
   get_mode(modestr);
   bool blocked = input_blocking();
 
-  PUT(rv, "mode", STRING_OBJ(cstr_to_string(modestr)));
+  PUT(rv, "mode", CSTR_TO_OBJ(modestr));
   PUT(rv, "blocking", BOOLEAN_OBJ(blocked));
 
   return rv;
@@ -1420,13 +1431,14 @@ ArrayOf(Dictionary) nvim_get_keymap(String mode)
 /// @param channel_id
 /// @param  mode  Mode short-name (map command prefix: "n", "i", "v", "x", …)
 ///               or "!" for |:map!|, or empty string for |:map|.
+///               "ia", "ca" or "!a" for abbreviation in Insert mode, Cmdline mode, or both, respectively
 /// @param  lhs   Left-hand-side |{lhs}| of the mapping.
 /// @param  rhs   Right-hand-side |{rhs}| of the mapping.
 /// @param  opts  Optional parameters map: Accepts all |:map-arguments| as keys except |<buffer>|,
 ///               values are booleans (default false). Also:
 ///               - "noremap" non-recursive mapping |:noremap|
 ///               - "desc" human-readable description.
-///               - "callback" Lua function called when the mapping is executed.
+///               - "callback" Lua function called in place of {rhs}.
 ///               - "replace_keycodes" (boolean) When "expr" is true, replace keycodes in the
 ///                 resulting string (see |nvim_replace_termcodes()|). Returning nil from the Lua
 ///                 "callback" is equivalent to returning an empty string.
@@ -1488,7 +1500,10 @@ Array nvim_get_api_info(uint64_t channel_id, Arena *arena)
 ///     - "commit" hash or similar identifier of commit
 /// @param type Must be one of the following values. Client libraries should
 ///             default to "remote" unless overridden by the user.
-///     - "remote" remote client connected to Nvim.
+///     - "remote" remote client connected "Nvim flavored" MessagePack-RPC (responses
+///                must be in reverse order of requests). |msgpack-rpc|
+///     - "msgpack-rpc" remote client connected to Nvim via fully MessagePack-RPC
+///                     compliant protocol.
 ///     - "ui" gui frontend
 ///     - "embedder" application using Nvim as a component (for example,
 ///                  IDE/editor implementing a vim mode).
@@ -1686,6 +1701,7 @@ static void write_msg(String message, bool to_err, bool writeln)
   if (c == NL) { \
     kv_push(line_buf, NUL); \
     msg(line_buf.items); \
+    msg_didout = true; \
     kv_drop(line_buf, kv_size(line_buf)); \
     kv_resize(line_buf, LINE_BUFFER_MIN_SIZE); \
   } else { \
@@ -1926,7 +1942,7 @@ Array nvim__inspect_cell(Integer grid, Integer row, Integer col, Arena *arena, E
   }
   ret = arena_array(arena, 3);
   size_t off = g->line_offset[(size_t)row] + (size_t)col;
-  ADD_C(ret, STRING_OBJ(cstr_as_string((char *)g->chars[off])));
+  ADD_C(ret, CSTR_AS_OBJ((char *)g->chars[off]));
   int attr = g->attrs[off];
   ADD_C(ret, DICTIONARY_OBJ(hl_get_attr_by_id(attr, true, arena, err)));
   // will not work first time
@@ -1950,7 +1966,7 @@ Object nvim__unpack(String str, Error *err)
 
 /// Deletes an uppercase/file named mark. See |mark-motions|.
 ///
-/// @note fails with error if a lowercase or buffer local named mark is used.
+/// @note Lowercase name (or other buffer-local mark) is an error.
 /// @param name       Mark name
 /// @return true if the mark was deleted, else false.
 /// @see |nvim_buf_del_mark()|
@@ -1972,12 +1988,13 @@ Boolean nvim_del_mark(String name, Error *err)
   return res;
 }
 
-/// Return a tuple (row, col, buffer, buffername) representing the position of
-/// the uppercase/file named mark. See |mark-motions|.
+/// Returns a `(row, col, buffer, buffername)` tuple representing the position
+/// of the uppercase/file named mark. "End of line" column position is returned
+/// as |v:maxcol| (big number). See |mark-motions|.
 ///
 /// Marks are (1,0)-indexed. |api-indexing|
 ///
-/// @note fails with error if a lowercase or buffer local named mark is used.
+/// @note Lowercase name (or other buffer-local mark) is an error.
 /// @param name       Mark name
 /// @param opts       Optional parameters. Reserved for future use.
 /// @return 4-tuple (row, col, buffer, buffername), (0, 0, 0, '') if the mark is
@@ -2035,7 +2052,7 @@ Array nvim_get_mark(String name, Dictionary opts, Error *err)
   ADD(rv, INTEGER_OBJ(row));
   ADD(rv, INTEGER_OBJ(col));
   ADD(rv, INTEGER_OBJ(bufnr));
-  ADD(rv, STRING_OBJ(cstr_to_string(filename)));
+  ADD(rv, CSTR_TO_OBJ(filename));
 
   if (allocated) {
     xfree(filename);
@@ -2056,7 +2073,7 @@ Array nvim_get_mark(String name, Dictionary opts, Error *err)
 ///           - use_winbar: (boolean) Evaluate winbar instead of statusline.
 ///           - use_tabline: (boolean) Evaluate tabline instead of statusline. When true, {winid}
 ///                                    is ignored. Mutually exclusive with {use_winbar}.
-///           - use_statuscol: (boolean) Evaluate statuscolumn instead of statusline.
+///           - use_statuscol_lnum: (number) Evaluate statuscolumn for this line number instead of statusline.
 ///
 /// @param[out] err Error details, if any.
 /// @return Dictionary containing statusline information, with these keys:
@@ -2074,12 +2091,8 @@ Dictionary nvim_eval_statusline(String str, Dict(eval_statusline) *opts, Error *
 
   int maxwidth;
   int fillchar = 0;
-  int use_bools = 0;
+  int statuscol_lnum = 0;
   Window window = 0;
-  bool use_winbar = false;
-  bool use_tabline = false;
-  bool use_statuscol = false;
-  bool highlights = false;
 
   if (str.size < 2 || memcmp(str.data, "%!", 2) != 0) {
     const char *const errmsg = check_stl_option(str.data);
@@ -2088,95 +2101,74 @@ Dictionary nvim_eval_statusline(String str, Dict(eval_statusline) *opts, Error *
     });
   }
 
-  if (HAS_KEY(opts->winid)) {
-    VALIDATE_T("winid", kObjectTypeInteger, opts->winid.type, {
-      return result;
-    });
-
-    window = (Window)opts->winid.data.integer;
+  if (HAS_KEY(opts, eval_statusline, winid)) {
+    window = opts->winid;
   }
-  if (HAS_KEY(opts->fillchar)) {
-    VALIDATE_T("fillchar", kObjectTypeString, opts->fillchar.type, {
-      return result;
-    });
-    VALIDATE_EXP((opts->fillchar.data.string.size != 0
-                  && ((size_t)utf_ptr2len(opts->fillchar.data.string.data)
-                      == opts->fillchar.data.string.size)),
+  if (HAS_KEY(opts, eval_statusline, fillchar)) {
+    VALIDATE_EXP((*opts->fillchar.data != 0
+                  && ((size_t)utf_ptr2len(opts->fillchar.data) == opts->fillchar.size)),
                  "fillchar", "single character", NULL, {
       return result;
     });
-    fillchar = utf_ptr2char(opts->fillchar.data.string.data);
+    fillchar = utf_ptr2char(opts->fillchar.data);
   }
-  if (HAS_KEY(opts->highlights)) {
-    highlights = api_object_to_bool(opts->highlights, "highlights", false, err);
 
-    if (ERROR_SET(err)) {
-      return result;
-    }
+  int use_bools = (int)opts->use_winbar + (int)opts->use_tabline;
+
+  win_T *wp = opts->use_tabline ? curwin : find_window_by_handle(window, err);
+  if (wp == NULL) {
+    api_set_error(err, kErrorTypeException, "unknown winid %d", window);
+    return result;
   }
-  if (HAS_KEY(opts->use_winbar)) {
-    use_winbar = api_object_to_bool(opts->use_winbar, "use_winbar", false, err);
-    use_bools++;
-    if (ERROR_SET(err)) {
+
+  if (HAS_KEY(opts, eval_statusline, use_statuscol_lnum)) {
+    statuscol_lnum = (int)opts->use_statuscol_lnum;
+    VALIDATE_RANGE(statuscol_lnum > 0 && statuscol_lnum <= wp->w_buffer->b_ml.ml_line_count,
+                   "use_statuscol_lnum", {
       return result;
-    }
-  }
-  if (HAS_KEY(opts->use_tabline)) {
-    use_tabline = api_object_to_bool(opts->use_tabline, "use_tabline", false, err);
+    });
     use_bools++;
-    if (ERROR_SET(err)) {
-      return result;
-    }
-  }
-  if (HAS_KEY(opts->use_statuscol)) {
-    use_statuscol = api_object_to_bool(opts->use_statuscol, "use_statuscol", false, err);
-    use_bools++;
-    if (ERROR_SET(err)) {
-      return result;
-    }
   }
   VALIDATE(use_bools <= 1, "%s",
-           "Can only use one of 'use_winbar', 'use_tabline' and 'use_statuscol'", {
+           "Can only use one of 'use_winbar', 'use_tabline' and 'use_statuscol_lnum'", {
     return result;
   });
 
-  win_T *wp, *ewp;
   int stc_hl_id = 0;
   statuscol_T statuscol = { 0 };
   SignTextAttrs sattrs[SIGN_SHOW_MAX] = { 0 };
 
-  if (use_tabline) {
-    wp = NULL;
-    ewp = curwin;
+  if (opts->use_tabline) {
     fillchar = ' ';
   } else {
-    wp = find_window_by_handle(window, err);
-    if (wp == NULL) {
-      api_set_error(err, kErrorTypeException, "unknown winid %d", window);
-      return result;
-    }
-    ewp = wp;
-
     if (fillchar == 0) {
-      if (use_winbar) {
+      if (opts->use_winbar) {
         fillchar = wp->w_p_fcs_chars.wbr;
       } else {
         int attr;
         fillchar = fillchar_status(&attr, wp);
       }
     }
-    if (use_statuscol) {
+    if (statuscol_lnum) {
       HlPriId line = { 0 };
       HlPriId cul  = { 0 };
       HlPriId num  = { 0 };
-      linenr_T lnum = (linenr_T)get_vim_var_nr(VV_LNUM);
+      linenr_T lnum = statuscol_lnum;
       int num_signs = buf_get_signattrs(wp->w_buffer, lnum, sattrs, &num, &line, &cul);
       decor_redraw_signs(wp->w_buffer, lnum - 1, &num_signs, sattrs, &num, &line, &cul);
+      wp->w_scwidth = win_signcol_count(wp);
 
       statuscol.sattrs = sattrs;
       statuscol.foldinfo = fold_info(wp, lnum);
-      statuscol.use_cul = wp->w_p_cul && lnum == wp->w_cursorline
-                          && (wp->w_p_culopt_flags & CULOPT_NBR);
+      wp->w_cursorline = win_cursorline_standout(wp) ? wp->w_cursor.lnum : 0;
+
+      if (wp->w_p_cul) {
+        if (statuscol.foldinfo.fi_level != 0 && statuscol.foldinfo.fi_lines > 0) {
+          wp->w_cursorline = statuscol.foldinfo.fi_lnum;
+        }
+        statuscol.use_cul = lnum == wp->w_cursorline && (wp->w_p_culopt_flags & CULOPT_NBR);
+      }
+
       statuscol.sign_cul_id = statuscol.use_cul ? cul.hl_id : 0;
       if (num.hl_id) {
         stc_hl_id = num.hl_id;
@@ -2187,30 +2179,29 @@ Dictionary nvim_eval_statusline(String str, Dict(eval_statusline) *opts, Error *
       } else {
         stc_hl_id = HLF_N + 1;
       }
+
+      set_vim_var_nr(VV_LNUM, lnum);
       set_vim_var_nr(VV_RELNUM, labs(get_cursor_rel_lnum(wp, lnum)));
       set_vim_var_nr(VV_VIRTNUM, 0);
     }
   }
 
-  if (HAS_KEY(opts->maxwidth)) {
-    VALIDATE_T("maxwidth", kObjectTypeInteger, opts->maxwidth.type, {
-      return result;
-    });
-
-    maxwidth = (int)opts->maxwidth.data.integer;
+  if (HAS_KEY(opts, eval_statusline, maxwidth)) {
+    maxwidth = (int)opts->maxwidth;
   } else {
-    maxwidth = use_statuscol ? win_col_off(wp)
-               : (use_tabline || (!use_winbar && global_stl_height() > 0)) ? Columns : wp->w_width;
+    maxwidth = statuscol_lnum ? win_col_off(wp)
+               : (opts->use_tabline
+                  || (!opts->use_winbar && global_stl_height() > 0)) ? Columns : wp->w_width;
   }
 
   char buf[MAXPATHL];
   stl_hlrec_t *hltab;
 
   // Temporarily reset 'cursorbind' to prevent side effects from moving the cursor away and back.
-  int p_crb_save = ewp->w_p_crb;
-  ewp->w_p_crb = false;
+  int p_crb_save = wp->w_p_crb;
+  wp->w_p_crb = false;
 
-  int width = build_stl_str_hl(ewp,
+  int width = build_stl_str_hl(wp,
                                buf,
                                sizeof(buf),
                                str.data,
@@ -2218,25 +2209,25 @@ Dictionary nvim_eval_statusline(String str, Dict(eval_statusline) *opts, Error *
                                0,
                                fillchar,
                                maxwidth,
-                               highlights ? &hltab : NULL,
+                               opts->highlights ? &hltab : NULL,
                                NULL,
-                               use_statuscol ? &statuscol : NULL);
+                               statuscol_lnum ? &statuscol : NULL);
 
   PUT(result, "width", INTEGER_OBJ(width));
 
   // Restore original value of 'cursorbind'
-  ewp->w_p_crb = p_crb_save;
+  wp->w_p_crb = p_crb_save;
 
-  if (highlights) {
+  if (opts->highlights) {
     Array hl_values = ARRAY_DICT_INIT;
     const char *grpname;
-    char user_group[6];
+    char user_group[15];  // strlen("User") + strlen("2147483647") + NUL
 
     // If first character doesn't have a defined highlight,
     // add the default highlight at the beginning of the highlight list
     if (hltab->start == NULL || (hltab->start - buf) != 0) {
       Dictionary hl_info = ARRAY_DICT_INIT;
-      grpname = get_default_stl_hl(wp, use_winbar, stc_hl_id);
+      grpname = get_default_stl_hl(opts->use_tabline ? NULL : wp, opts->use_winbar, stc_hl_id);
 
       PUT(hl_info, "start", INTEGER_OBJ(0));
       PUT(hl_info, "group", CSTR_TO_OBJ(grpname));
@@ -2250,7 +2241,7 @@ Dictionary nvim_eval_statusline(String str, Dict(eval_statusline) *opts, Error *
       PUT(hl_info, "start", INTEGER_OBJ(sp->start - buf));
 
       if (sp->userhl == 0) {
-        grpname = get_default_stl_hl(wp, use_winbar, stc_hl_id);
+        grpname = get_default_stl_hl(opts->use_tabline ? NULL : wp, opts->use_winbar, stc_hl_id);
       } else if (sp->userhl < 0) {
         grpname = syn_id2name(-sp->userhl);
       } else {

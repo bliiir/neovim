@@ -316,7 +316,7 @@ local function test_cmdline(linegrid)
     screen:expect{grid=[[
                                |
       {2:[No Name]                }|
-      {1::}make^                    |
+      {1::}mak^e                    |
       {3:[Command Line]           }|
                                |
     ]]}
@@ -326,7 +326,7 @@ local function test_cmdline(linegrid)
     screen:expect{grid=[[
                                |
       {2:[No Name]                }|
-      {1::}make^                    |
+      {1::}mak^e                    |
       {3:[Command Line]           }|
                                |
     ]], cmdline={nil, {
@@ -339,7 +339,7 @@ local function test_cmdline(linegrid)
     screen:expect{grid=[[
                                |
       {2:[No Name]                }|
-      {1::}make^                    |
+      {1::}mak^e                    |
       {3:[Command Line]           }|
                                |
     ]], cmdline={nil, {
@@ -352,7 +352,7 @@ local function test_cmdline(linegrid)
     screen:expect{grid=[[
                                |
       {2:[No Name]                }|
-      {1::}make^                    |
+      {1::}mak^e                    |
       {3:[Command Line]           }|
                                |
     ]]}
@@ -944,14 +944,63 @@ describe('statusline is redrawn on entering cmdline', function()
   end)
 end)
 
+it('tabline is not redrawn in Ex mode #24122', function()
+  clear()
+  local screen = Screen.new(60, 5)
+  screen:set_default_attr_ids({
+    [0] = {bold = true, foreground = Screen.colors.Blue},  -- NonText
+    [1] = {bold = true, reverse = true},  -- MsgSeparator
+    [2] = {reverse = true},  -- TabLineFill
+  })
+  screen:attach()
+
+  exec([[
+    set showtabline=2
+    set tabline=%!MyTabLine()
+
+    function! MyTabLine()
+
+      return "foo"
+    endfunction
+  ]])
+
+  feed('gQ')
+  screen:expect{grid=[[
+    {2:foo                                                         }|
+                                                                |
+    {1:                                                            }|
+    Entering Ex mode.  Type "visual" to go to Normal mode.      |
+    :^                                                           |
+  ]]}
+
+  feed('echo 1<CR>')
+  screen:expect{grid=[[
+    {1:                                                            }|
+    Entering Ex mode.  Type "visual" to go to Normal mode.      |
+    :echo 1                                                     |
+    1                                                           |
+    :^                                                           |
+  ]]}
+end)
+
 describe("cmdline height", function()
+  before_each(clear)
+
   it("does not crash resized screen #14263", function()
-    clear()
     local screen = Screen.new(25, 10)
     screen:attach()
     command('set cmdheight=9999')
     screen:try_resize(25, 5)
     assert_alive()
+  end)
+
+  it('unchanged when restoring window sizes with global statusline', function()
+    command('set cmdheight=2 laststatus=2')
+    feed('q:')
+    command('set cmdheight=1 laststatus=3 | quit')
+    -- Available lines changed, so closing cmdwin should skip restoring window sizes, leaving the
+    -- cmdheight unchanged.
+    eq(1, eval('&cmdheight'))
   end)
 end)
 

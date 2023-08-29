@@ -852,11 +852,11 @@ func VerifyInternal(buf, dumpfile, extra)
   call term_sendkeys(a:buf, ":diffupdate!\<CR>")
   " trailing : for leaving the cursor on the command line
   call term_sendkeys(a:buf, ":set diffopt=internal,filler" . a:extra . "\<CR>:")
-  call TermWait(a:buf)
   call VerifyScreenDump(a:buf, a:dumpfile, {})
 endfunc
 
 func Test_diff_screen()
+  let g:test_is_flaky = 1
   CheckScreendump
   CheckFeature menu
 
@@ -1603,6 +1603,21 @@ func Test_diff_scroll()
   call StopVimInTerminal(buf)
   call delete('Xleft')
   call delete('Xright')
+endfunc
+
+" This was scrolling too many lines.
+func Test_diff_scroll_wrap_on()
+  20new
+  40vsplit
+  call setline(1, map(range(1, 9), 'repeat(v:val, 200)'))
+  setlocal number diff so=0
+  redraw
+  normal! jj
+  call assert_equal(1, winsaveview().topline)
+  normal! j
+  call assert_equal(2, winsaveview().topline)
+  bwipe!
+  bwipe!
 endfunc
 
 " This was trying to update diffs for a buffer being closed

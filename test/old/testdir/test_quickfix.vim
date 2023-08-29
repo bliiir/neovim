@@ -167,19 +167,21 @@ func XlistTests(cchar)
 	      \ {'lnum':20,'col':10,'type':'e','text':'Error','nr':22},
 	      \ {'lnum':30,'col':15,'type':'i','text':'Info','nr':33},
 	      \ {'lnum':40,'col':20,'type':'x', 'text':'Other','nr':44},
-	      \ {'lnum':50,'col':25,'type':"\<C-A>",'text':'one','nr':55}])
+	      \ {'lnum':50,'col':25,'type':"\<C-A>",'text':'one','nr':55},
+	      \ {'lnum':0,'type':'e','text':'Check type field is output even when lnum==0. ("error" was not output by v9.0.0736.)','nr':66}])
   let l = split(execute('Xlist', ""), "\n")
   call assert_equal([' 1:10 col 5 warning  11: Warning',
 	      \ ' 2:20 col 10 error  22: Error',
 	      \ ' 3:30 col 15 info  33: Info',
 	      \ ' 4:40 col 20 x  44: Other',
-	      \ ' 5:50 col 25  55: one'], l)
+	      \ ' 5:50 col 25  55: one',
+              \ ' 6 error  66: Check type field is output even when lnum==0. ("error" was not output by v9.0.0736.)'], l)
 
   " Test for module names, one needs to explicitly set `'valid':v:true` so
   call g:Xsetlist([
-        \ {'lnum':10,'col':5,'type':'W','module':'Data.Text','text':'ModuleWarning','nr':11,'valid':v:true},
-        \ {'lnum':20,'col':10,'type':'W','module':'Data.Text','filename':'Data/Text.hs','text':'ModuleWarning','nr':22,'valid':v:true},
-        \ {'lnum':30,'col':15,'type':'W','filename':'Data/Text.hs','text':'FileWarning','nr':33,'valid':v:true}])
+	\ {'lnum':10,'col':5,'type':'W','module':'Data.Text','text':'ModuleWarning','nr':11,'valid':v:true},
+	\ {'lnum':20,'col':10,'type':'W','module':'Data.Text','filename':'Data/Text.hs','text':'ModuleWarning','nr':22,'valid':v:true},
+	\ {'lnum':30,'col':15,'type':'W','filename':'Data/Text.hs','text':'FileWarning','nr':33,'valid':v:true}])
   let l = split(execute('Xlist', ""), "\n")
   call assert_equal([' 1 Data.Text:10 col 5 warning  11: ModuleWarning',
 	\ ' 2 Data.Text:20 col 10 warning  22: ModuleWarning',
@@ -1029,7 +1031,7 @@ func Test_efm1()
       ﻿"Xtestfile", line 6 col 19; this is an error
       gcc -c -DHAVE_CONFIsing-prototypes -I/usr/X11R6/include  version.c
       Xtestfile:9: parse error before `asd'
-      make: *** [vim] Error 1
+      make: *** [src/vim/testdir/Makefile:100: test_quickfix] Error 1
       in file "Xtestfile" linenr 10: there is an error
 
       2 returned
@@ -1647,13 +1649,23 @@ func SetXlistTests(cchar, bnum)
   call s:setup_commands(a:cchar)
 
   call g:Xsetlist([{'bufnr': a:bnum, 'lnum': 1},
-	      \  {'bufnr': a:bnum, 'lnum': 2, 'end_lnum': 3, 'col': 4, 'end_col': 5}])
+        \  {'bufnr': a:bnum, 'lnum': 2, 'end_lnum': 3, 'col': 4, 'end_col': 5, 'user_data': {'6': [7, 8]}}])
   let l = g:Xgetlist()
   call assert_equal(2, len(l))
   call assert_equal(2, l[1].lnum)
   call assert_equal(3, l[1].end_lnum)
   call assert_equal(4, l[1].col)
   call assert_equal(5, l[1].end_col)
+  call assert_equal({'6': [7, 8]}, l[1].user_data)
+
+  " Test that user_data is garbage collected
+  call g:Xsetlist([{'user_data': ['high', 5]},
+        \  {'user_data': {'this': [7, 'eight'], 'is': ['a', 'dictionary']}}])
+  call test_garbagecollect_now()
+  let l = g:Xgetlist()
+  call assert_equal(2, len(l))
+  call assert_equal(['high', 5], l[0].user_data)
+  call assert_equal({'this': [7, 'eight'], 'is': ['a', 'dictionary']}, l[1].user_data)
 
   Xnext
   call g:Xsetlist([{'bufnr': a:bnum, 'lnum': 3}], 'a')
@@ -2425,6 +2437,16 @@ func Xproperty_tests(cchar)
     call assert_equal(246, d.context)
     " set other Vim data types as context
     call g:Xsetlist([], 'a', {'context' : v:_null_blob})
+    if has('channel')
+      call g:Xsetlist([], 'a', {'context' : test_null_channel()})
+    endif
+    if has('job')
+      call g:Xsetlist([], 'a', {'context' : test_null_job()})
+    endif
+    " Nvim doesn't have null functions
+    " call g:Xsetlist([], 'a', {'context' : test_null_function()})
+    " Nvim doesn't have null partials
+    " call g:Xsetlist([], 'a', {'context' : test_null_partial()})
     call g:Xsetlist([], 'a', {'context' : ''})
     call test_garbagecollect_now()
     if a:cchar == 'l'
@@ -6240,28 +6262,6 @@ func Test_very_long_error_line()
   call setqflist([], 'f')
 endfunc
 
-" The test depends on deferred delete and string interpolation, which haven't
-" been ported, so override it with a rewrite that doesn't use these features.
-func! Test_very_long_error_line()
-  let msg = repeat('abcdefghijklmn', 146)
-  let emsg = 'Xlonglines.c:1:' . msg
-  call writefile([msg, emsg], 'Xerror')
-  cfile Xerror
-  call delete('Xerror')
-  cwindow
-  call assert_equal('|| ' .. msg, getline(1))
-  call assert_equal('Xlonglines.c|1| ' .. msg, getline(2))
-  cclose
-
-  let l = execute('clist!')->split("\n")
-  call assert_equal([' 1: ' .. msg, ' 2 Xlonglines.c:1: ' .. msg], l)
-
-  let l = execute('cc')->split("\n")
-  call assert_equal(['(2 of 2): ' .. msg], l)
-
-  call setqflist([], 'f')
-endfunc
-
 " In the quickfix window, spaces at the beginning of an informational line
 " should not be removed but should be removed from an error line.
 func Test_info_line_with_space()
@@ -6292,5 +6292,35 @@ func Test_setqflist_cb_arg()
   call setqflist([], 'f')
 endfunc
 
+" Test that setqflist() should not prevent :stopinsert from working
+func Test_setqflist_stopinsert()
+  new
+  call setqflist([], 'f')
+  copen
+  cclose
+  func StopInsert()
+    stopinsert
+    call setqflist([{'text': 'foo'}])
+    return ''
+  endfunc
+
+  call setline(1, 'abc')
+  call cursor(1, 1)
+  call feedkeys("i\<C-R>=StopInsert()\<CR>$", 'tnix')
+  call assert_equal('foo', getqflist()[0].text)
+  call assert_equal([0, 1, 3, 0, v:maxcol], getcurpos())
+  call assert_equal(['abc'], getline(1, '$'))
+
+  delfunc StopInsert
+  call setqflist([], 'f')
+  bwipe!
+endfunc
+
+func Test_quickfix_buffer_contents()
+  call setqflist([{'filename':'filename', 'pattern':'pattern', 'text':'text'}])
+  copen
+  call assert_equal(['filename|pattern| text'], getline(1, '$'))  " The assert failed with Vim v9.0.0736; '| text' did not appear after the pattern.
+  call setqflist([], 'f')
+endfunc
 
 " vim: shiftwidth=2 sts=2 expandtab

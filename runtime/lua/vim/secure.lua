@@ -1,6 +1,5 @@
 local M = {}
 
----@private
 --- Reads trust database from $XDG_STATE_HOME/nvim/trust.
 ---
 ---@return (table) Contents of trust database, if it exists. Empty table otherwise.
@@ -22,7 +21,6 @@ local function read_trust()
   return trust
 end
 
----@private
 --- Writes provided {trust} table to trust database at
 --- $XDG_STATE_HOME/nvim/trust.
 ---
@@ -51,7 +49,7 @@ end
 ---        trusted, or nil otherwise.
 function M.read(path)
   vim.validate({ path = { path, 's' } })
-  local fullpath = vim.loop.fs_realpath(vim.fs.normalize(path))
+  local fullpath = vim.uv.fs_realpath(vim.fs.normalize(path))
   if not fullpath then
     return nil
   end
@@ -121,9 +119,8 @@ end
 ---    - path (string|nil): Path to a file to update. Mutually exclusive with {bufnr}.
 ---      Cannot be used when {action} is "allow".
 ---    - bufnr (number|nil): Buffer number to update. Mutually exclusive with {path}.
----@return (boolean, string) success, msg:
----    - true and full path of target file if operation was successful
----    - false and error message on failure
+---@return boolean success true if operation was successful
+---@return string msg full path if operation was successful, else error message
 function M.trust(opts)
   vim.validate({
     path = { opts.path, 's', true },
@@ -149,13 +146,13 @@ function M.trust(opts)
 
   local fullpath
   if path then
-    fullpath = vim.loop.fs_realpath(vim.fs.normalize(path))
+    fullpath = vim.uv.fs_realpath(vim.fs.normalize(path))
   elseif bufnr then
     local bufname = vim.api.nvim_buf_get_name(bufnr)
     if bufname == '' then
       return false, 'buffer is not associated with a file'
     end
-    fullpath = vim.loop.fs_realpath(vim.fs.normalize(bufname))
+    fullpath = vim.uv.fs_realpath(vim.fs.normalize(bufname))
   else
     error('one of "path" or "bufnr" is required')
   end

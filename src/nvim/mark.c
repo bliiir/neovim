@@ -84,7 +84,7 @@ void clear_fmark(fmark_T *fm)
   FUNC_ATTR_NONNULL_ALL
 {
   free_fmark(*fm);
-  CLEAR_POINTER(fm);
+  *fm = (fmark_T)INIT_FMARK;
 }
 
 // Set named mark "c" to position "pos".
@@ -239,7 +239,7 @@ fmark_T *get_jumplist(win_T *win, int count)
     return NULL;
   }
 
-  for (;;) {
+  while (true) {
     if (win->w_jumplistidx + count < 0
         || win->w_jumplistidx + count >= win->w_jumplistlen) {
       return NULL;
@@ -541,7 +541,11 @@ MarkMoveRes mark_move_to(fmark_T *fm, MarkMove flags)
 {
   static fmark_T fm_copy = INIT_FMARK;
   MarkMoveRes res = kMarkMoveSuccess;
-  if (!mark_check(fm)) {
+  const char *errormsg = NULL;
+  if (!mark_check(fm, &errormsg)) {
+    if (errormsg != NULL) {
+      emsg(errormsg);
+    }
     res = kMarkMoveFailed;
     goto end;
   }
@@ -557,7 +561,10 @@ MarkMoveRes mark_move_to(fmark_T *fm, MarkMove flags)
       goto end;
     }
     // Check line count now that the **destination buffer is loaded**.
-    if (!mark_check_line_bounds(curbuf, fm)) {
+    if (!mark_check_line_bounds(curbuf, fm, &errormsg)) {
+      if (errormsg != NULL) {
+        emsg(errormsg);
+      }
       res |= kMarkMoveFailed;
       goto end;
     }
@@ -710,43 +717,45 @@ static void fmarks_check_one(xfmark_T *fm, char *name, buf_T *buf)
 
 /// Check the position in @a fm is valid.
 ///
-/// Emit error message and return accordingly.
-///
 /// Checks for:
 /// - NULL raising unknown mark error.
 /// - Line number <= 0 raising mark not set.
 /// - Line number > buffer line count, raising invalid mark.
+///
 /// @param fm[in]  File mark to check.
+/// @param errormsg[out]  Error message, if any.
 ///
 /// @return  true if the mark passes all the above checks, else false.
-bool mark_check(fmark_T *fm)
+bool mark_check(fmark_T *fm, const char **errormsg)
 {
   if (fm == NULL) {
-    emsg(_(e_umark));
+    *errormsg = _(e_umark);
     return false;
   } else if (fm->mark.lnum <= 0) {
     // In both cases it's an error but only raise when equals to 0
     if (fm->mark.lnum == 0) {
-      emsg(_(e_marknotset));
+      *errormsg = _(e_marknotset);
     }
     return false;
   }
   // Only check for valid line number if the buffer is loaded.
-  if (fm->fnum == curbuf->handle && !mark_check_line_bounds(curbuf, fm)) {
+  if (fm->fnum == curbuf->handle && !mark_check_line_bounds(curbuf, fm, errormsg)) {
     return false;
   }
   return true;
 }
 
 /// Check if a mark line number is greater than the buffer line count, and set e_markinval.
+///
 /// @note  Should be done after the buffer is loaded into memory.
 /// @param buf  Buffer where the mark is set.
 /// @param fm  Mark to check.
+/// @param errormsg[out]  Error message, if any.
 /// @return  true if below line count else false.
-bool mark_check_line_bounds(buf_T *buf, fmark_T *fm)
+bool mark_check_line_bounds(buf_T *buf, fmark_T *fm, const char **errormsg)
 {
   if (buf != NULL && fm->mark.lnum > buf->b_ml.ml_line_count) {
-    emsg(_(e_markinval));
+    *errormsg = _(e_markinval);
     return false;
   }
   return true;
@@ -1100,19 +1109,19 @@ void ex_changes(exarg_T *eap)
     } \
   }
 
-// Adjust marks between line1 and line2 (inclusive) to move 'amount' lines.
+// Adjust marks between "line1" and "line2" (inclusive) to move "amount" lines.
 // Must be called before changed_*(), appended_lines() or deleted_lines().
 // May be called before or after changing the text.
-// When deleting lines line1 to line2, use an 'amount' of MAXLNUM: The marks
-// within this range are made invalid.
-// If 'amount_after' is non-zero adjust marks after line2.
+// When deleting lines "line1" to "line2", use an "amount" of MAXLNUM: The
+// marks within this range are made invalid.
+// If "amount_after" is non-zero adjust marks after "line2".
 // Example: Delete lines 34 and 35: mark_adjust(34, 35, MAXLNUM, -2);
 // Example: Insert two lines below 55: mark_adjust(56, MAXLNUM, 2, 0);
 //                                 or: mark_adjust(56, 55, MAXLNUM, 2);
 void mark_adjust(linenr_T line1, linenr_T line2, linenr_T amount, linenr_T amount_after,
                  ExtmarkOp op)
 {
-  mark_adjust_internal(line1, line2, amount, amount_after, true, op);
+  mark_adjust_buf(curbuf, line1, line2, amount, amount_after, true, false, op);
 }
 
 // mark_adjust_nofold() does the same as mark_adjust() but without adjusting
@@ -1123,13 +1132,13 @@ void mark_adjust(linenr_T line1, linenr_T line2, linenr_T amount, linenr_T amoun
 void mark_adjust_nofold(linenr_T line1, linenr_T line2, linenr_T amount, linenr_T amount_after,
                         ExtmarkOp op)
 {
-  mark_adjust_internal(line1, line2, amount, amount_after, false, op);
+  mark_adjust_buf(curbuf, line1, line2, amount, amount_after, false, false, op);
 }
 
-static void mark_adjust_internal(linenr_T line1, linenr_T line2, linenr_T amount,
-                                 linenr_T amount_after, bool adjust_folds, ExtmarkOp op)
+void mark_adjust_buf(buf_T *buf, linenr_T line1, linenr_T line2, linenr_T amount,
+                     linenr_T amount_after, bool adjust_folds, bool by_api, ExtmarkOp op)
 {
-  int fnum = curbuf->b_fnum;
+  int fnum = buf->b_fnum;
   linenr_T *lp;
   static pos_T initpos = { 1, 0, 0 };
 
@@ -1140,7 +1149,7 @@ static void mark_adjust_internal(linenr_T line1, linenr_T line2, linenr_T amount
   if ((cmdmod.cmod_flags & CMOD_LOCKMARKS) == 0) {
     // named marks, lower case and upper case
     for (int i = 0; i < NMARKS; i++) {
-      ONE_ADJUST(&(curbuf->b_namedm[i].mark.lnum));
+      ONE_ADJUST(&(buf->b_namedm[i].mark.lnum));
       if (namedfm[i].fmark.fnum == fnum) {
         ONE_ADJUST_NODEL(&(namedfm[i].fmark.mark.lnum));
       }
@@ -1152,54 +1161,56 @@ static void mark_adjust_internal(linenr_T line1, linenr_T line2, linenr_T amount
     }
 
     // last Insert position
-    ONE_ADJUST(&(curbuf->b_last_insert.mark.lnum));
+    ONE_ADJUST(&(buf->b_last_insert.mark.lnum));
 
     // last change position
-    ONE_ADJUST(&(curbuf->b_last_change.mark.lnum));
+    ONE_ADJUST(&(buf->b_last_change.mark.lnum));
 
     // last cursor position, if it was set
-    if (!equalpos(curbuf->b_last_cursor.mark, initpos)) {
-      ONE_ADJUST(&(curbuf->b_last_cursor.mark.lnum));
+    if (!equalpos(buf->b_last_cursor.mark, initpos)) {
+      ONE_ADJUST(&(buf->b_last_cursor.mark.lnum));
     }
 
     // list of change positions
-    for (int i = 0; i < curbuf->b_changelistlen; i++) {
-      ONE_ADJUST_NODEL(&(curbuf->b_changelist[i].mark.lnum));
+    for (int i = 0; i < buf->b_changelistlen; i++) {
+      ONE_ADJUST_NODEL(&(buf->b_changelist[i].mark.lnum));
     }
 
     // Visual area
-    ONE_ADJUST_NODEL(&(curbuf->b_visual.vi_start.lnum));
-    ONE_ADJUST_NODEL(&(curbuf->b_visual.vi_end.lnum));
+    ONE_ADJUST_NODEL(&(buf->b_visual.vi_start.lnum));
+    ONE_ADJUST_NODEL(&(buf->b_visual.vi_end.lnum));
 
     // quickfix marks
-    if (!qf_mark_adjust(NULL, line1, line2, amount, amount_after)) {
-      curbuf->b_has_qf_entry &= ~BUF_HAS_QF_ENTRY;
+    if (!qf_mark_adjust(buf, NULL, line1, line2, amount, amount_after)) {
+      buf->b_has_qf_entry &= ~BUF_HAS_QF_ENTRY;
     }
     // location lists
     bool found_one = false;
     FOR_ALL_TAB_WINDOWS(tab, win) {
-      found_one |= qf_mark_adjust(win, line1, line2, amount, amount_after);
+      found_one |= qf_mark_adjust(buf, win, line1, line2, amount, amount_after);
     }
     if (!found_one) {
-      curbuf->b_has_qf_entry &= ~BUF_HAS_LL_ENTRY;
+      buf->b_has_qf_entry &= ~BUF_HAS_LL_ENTRY;
     }
 
-    sign_mark_adjust(line1, line2, amount, amount_after);
+    sign_mark_adjust(buf, line1, line2, amount, amount_after);
   }
 
   if (op != kExtmarkNOOP) {
-    extmark_adjust(curbuf, line1, line2, amount, amount_after, op);
+    extmark_adjust(buf, line1, line2, amount, amount_after, op);
   }
 
-  // previous context mark
-  ONE_ADJUST(&(curwin->w_pcmark.lnum));
+  if (curwin->w_buffer == buf) {
+    // previous context mark
+    ONE_ADJUST(&(curwin->w_pcmark.lnum));
 
-  // previous pcmark
-  ONE_ADJUST(&(curwin->w_prev_pcmark.lnum));
+    // previous pcpmark
+    ONE_ADJUST(&(curwin->w_prev_pcmark.lnum));
 
-  // saved cursor for formatting
-  if (saved_cursor.lnum != 0) {
-    ONE_ADJUST_NODEL(&(saved_cursor.lnum));
+    // saved cursor for formatting
+    if (saved_cursor.lnum != 0) {
+      ONE_ADJUST_NODEL(&(saved_cursor.lnum));
+    }
   }
 
   // Adjust items in all windows related to the current buffer.
@@ -1214,7 +1225,7 @@ static void mark_adjust_internal(linenr_T line1, linenr_T line2, linenr_T amount
       }
     }
 
-    if (win->w_buffer == curbuf) {
+    if (win->w_buffer == buf) {
       if ((cmdmod.cmod_flags & CMOD_LOCKMARKS) == 0) {
         // marks in the tag stack
         for (int i = 0; i < win->w_tagstacklen; i++) {
@@ -1232,22 +1243,29 @@ static void mark_adjust_internal(linenr_T line1, linenr_T line2, linenr_T amount
 
       // topline and cursor position for windows with the same buffer
       // other than the current window
-      if (win != curwin) {
+      if (win != curwin || by_api) {
         if (win->w_topline >= line1 && win->w_topline <= line2) {
           if (amount == MAXLNUM) {                  // topline is deleted
             if (line1 <= 1) {
               win->w_topline = 1;
             } else {
-              win->w_topline = line1 - 1;
+              // api: if the deleted region was replaced with new contents, display that
+              win->w_topline = (by_api && amount_after > line1 - line2 - 1) ? line1 : line1 - 1;
             }
-          } else {                      // keep topline on the same line
+          } else if (win->w_topline > line1) {
+            // keep topline on the same line, unless inserting just
+            // above it (we probably want to see that line then)
             win->w_topline += amount;
           }
           win->w_topfill = 0;
-        } else if (amount_after && win->w_topline > line2) {
+          // api: display new line if inserted right at topline
+          // TODO(bfredl): maybe always?
+        } else if (amount_after && win->w_topline > line2 + (by_api ? 1 : 0)) {
           win->w_topline += amount_after;
           win->w_topfill = 0;
         }
+      }
+      if (win != curwin && !by_api) {
         if (win->w_cursor.lnum >= line1 && win->w_cursor.lnum <= line2) {
           if (amount == MAXLNUM) {         // line with cursor is deleted
             if (line1 <= 1) {
@@ -1271,7 +1289,7 @@ static void mark_adjust_internal(linenr_T line1, linenr_T line2, linenr_T amount
   }
 
   // adjust diffs
-  diff_mark_adjust(line1, line2, amount, amount_after);
+  diff_mark_adjust(buf, line1, line2, amount, amount_after);
 }
 
 // This code is used often, needs to be fast.
@@ -1695,7 +1713,7 @@ void mark_mb_adjustpos(buf_T *buf, pos_T *lp)
   FUNC_ATTR_NONNULL_ALL
 {
   if (lp->col > 0 || lp->coladd > 1) {
-    const char *const p = ml_get_buf(buf, lp->lnum, false);
+    const char *const p = ml_get_buf(buf, lp->lnum);
     if (*p == NUL || (int)strlen(p) < lp->col) {
       lp->col = 0;
     } else {

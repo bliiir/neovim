@@ -620,7 +620,7 @@ func Test_pum_with_folds_two_tabs()
 
   call writefile(lines, 'Xpumscript')
   let buf = RunVimInTerminal('-S Xpumscript', #{rows: 10})
-  call term_wait(buf, 100)
+  call TermWait(buf, 50)
   call term_sendkeys(buf, "a\<C-N>")
   call VerifyScreenDump(buf, 'Test_pum_with_folds_two_tabs', {})
 
@@ -645,9 +645,8 @@ func Test_pum_with_preview_win()
 
   call writefile(lines, 'Xpreviewscript')
   let buf = RunVimInTerminal('-S Xpreviewscript', #{rows: 12})
-  call term_wait(buf, 100)
   call term_sendkeys(buf, "Gi\<C-X>\<C-O>")
-  call term_wait(buf, 200)
+  call TermWait(buf, 200)
   call term_sendkeys(buf, "\<C-N>")
   call VerifyScreenDump(buf, 'Test_pum_with_preview_win', {})
 
@@ -1598,11 +1597,11 @@ func Test_completefunc_callback()
     bw!
 
     # Test for using a script-local function name
-    def s:LocalCompleteFunc(findstart: number, base: string): any
+    def LocalCompleteFunc(findstart: number, base: string): any
       add(g:LocalCompleteFuncArgs, [findstart, base])
       return findstart ? 0 : []
     enddef
-    &completefunc = s:LocalCompleteFunc
+    &completefunc = LocalCompleteFunc
     new | only
     setline(1, 'three')
     g:LocalCompleteFuncArgs = []
@@ -1855,11 +1854,11 @@ func Test_omnifunc_callback()
     bw!
 
     # Test for using a script-local function name
-    def s:LocalOmniFunc(findstart: number, base: string): any
+    def LocalOmniFunc(findstart: number, base: string): any
       add(g:LocalOmniFuncArgs, [findstart, base])
       return findstart ? 0 : []
     enddef
-    &omnifunc = s:LocalOmniFunc
+    &omnifunc = LocalOmniFunc
     new | only
     setline(1, 'three')
     g:LocalOmniFuncArgs = []
@@ -2148,11 +2147,11 @@ func Test_thesaurusfunc_callback()
     bw!
 
     # Test for using a script-local function name
-    def s:LocalTsrFunc(findstart: number, base: string): any
+    def LocalTsrFunc(findstart: number, base: string): any
       add(g:LocalTsrFuncArgs, [findstart, base])
       return findstart ? 0 : []
     enddef
-    &thesaurusfunc = s:LocalTsrFunc
+    &thesaurusfunc = LocalTsrFunc
     new | only
     setline(1, 'three')
     g:LocalTsrFuncArgs = []
@@ -2236,5 +2235,22 @@ func Test_ins_complete_end_of_line()
 
   bwipe!
 endfunc
+
+func s:Tagfunc(t,f,o)
+  bwipe!
+  return []
+endfunc
+
+" This was using freed memory, since 'complete' was in a wiped out buffer.
+" Also using a window that was closed.
+func Test_tagfunc_wipes_out_buffer()
+  new
+  set complete=.,t,w,b,u,i
+  se tagfunc=s:Tagfunc
+  sil norm i
+
+  bwipe!
+endfunc
+
 
 " vim: shiftwidth=2 sts=2 expandtab

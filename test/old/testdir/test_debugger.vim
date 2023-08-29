@@ -36,7 +36,7 @@ endfunc
 " If the expected output argument is supplied, then check for it.
 func RunDbgCmd(buf, cmd, ...)
   call term_sendkeys(a:buf, a:cmd . "\r")
-  call term_wait(a:buf, 20)
+  call TermWait(a:buf)
 
   if a:0 != 0
     let options = #{match: 'equal'}
@@ -346,6 +346,39 @@ func Test_Debugger_breakadd()
 
   call assert_fails('breakadd here', 'E32:')
   call assert_fails('breakadd file Xtest.vim /\)/', 'E55:')
+endfunc
+
+" Test for expression breakpoint set using ":breakadd expr <expr>"
+func Test_Debugger_breakadd_expr()
+  CheckRunVimInTerminal
+  let lines =<< trim END
+    let g:Xtest_var += 1
+  END
+  call writefile(lines, 'Xtest.vim')
+
+  " Start Vim in a terminal
+  let buf = RunVimInTerminal('Xtest.vim', {})
+  call RunDbgCmd(buf, ':let g:Xtest_var = 10')
+  call RunDbgCmd(buf, ':breakadd expr g:Xtest_var')
+  call RunDbgCmd(buf, ':source %')
+  let expected =<< eval trim END
+    Oldval = "10"
+    Newval = "11"
+    {fnamemodify('Xtest.vim', ':p')}
+    line 1: let g:Xtest_var += 1
+  END
+  call RunDbgCmd(buf, ':source %', expected)
+  call RunDbgCmd(buf, 'cont')
+  let expected =<< eval trim END
+    Oldval = "11"
+    Newval = "12"
+    {fnamemodify('Xtest.vim', ':p')}
+    line 1: let g:Xtest_var += 1
+  END
+  call RunDbgCmd(buf, ':source %', expected)
+
+  call StopVimInTerminal(buf)
+  call delete('Xtest.vim')
 endfunc
 
 func Test_Backtrace_Through_Source()

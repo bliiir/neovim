@@ -31,9 +31,12 @@ func Test_has()
     call assert_equal(1, or(has('ttyin'), 1))
     call assert_equal(0, and(has('ttyout'), 0))
     call assert_equal(1, has('multi_byte_encoding'))
+    call assert_equal(0, has(':tearoff'))
   endif
   call assert_equal(1, has('vcon', 1))
   call assert_equal(1, has('mouse_gpm_enabled', 1))
+
+  call assert_equal(has('gui_win32') && has('menu'), has(':tearoff'))
 
   call assert_equal(0, has('nonexistent'))
   call assert_equal(0, has('nonexistent', 1))
@@ -81,6 +84,18 @@ func Test_empty()
 
   call assert_equal(0, empty(function('Test_empty')))
   call assert_equal(0, empty(function('Test_empty', [0])))
+endfunc
+
+func Test_err_teapot()
+  throw 'Skipped: Nvim does not have err_teapot()'
+  call assert_fails('call err_teapot()', "E418: I'm a teapot")
+  call assert_fails('call err_teapot(0)', "E418: I'm a teapot")
+  call assert_fails('call err_teapot(v:false)', "E418: I'm a teapot")
+
+  call assert_fails('call err_teapot("1")', "E503: Coffee is currently not available")
+  call assert_fails('call err_teapot(v:true)', "E503: Coffee is currently not available")
+  let expr = 1
+  call assert_fails('call err_teapot(expr)', "E503: Coffee is currently not available")
 endfunc
 
 func Test_len()
@@ -153,10 +168,12 @@ func Test_strwidth()
     call assert_fails('call strwidth({->0})', 'E729:')
     call assert_fails('call strwidth([])', 'E730:')
     call assert_fails('call strwidth({})', 'E731:')
-    if has('float')
-      call assert_fails('call strwidth(1.2)', 'E806:')
-    endif
   endfor
+
+  if has('float')
+    call assert_equal(3, strwidth(1.2))
+    call CheckDefExecAndScriptFailure(['echo strwidth(1.2)'], 'E806:')
+  endif
 
   set ambiwidth&
 endfunc
@@ -221,7 +238,9 @@ func Test_str2nr()
   call assert_fails('call str2nr([])', 'E730:')
   call assert_fails('call str2nr({->2})', 'E729:')
   if has('float')
-    call assert_fails('call str2nr(1.2)', 'E806:')
+    call assert_equal(1, str2nr(1.2))
+    call CheckDefExecFailure(['echo str2nr(1.2)'], 'E1013:')
+    call CheckScriptFailure(['vim9script', 'echo str2nr(1.2)'], 'E806:')
   endif
   call assert_fails('call str2nr(10, [])', 'E745:')
 endfunc
@@ -372,7 +391,8 @@ func Test_simplify()
   call assert_fails('call simplify([])', 'E730:')
   call assert_fails('call simplify({})', 'E731:')
   if has('float')
-    call assert_fails('call simplify(1.2)', 'E806:')
+    call assert_equal('1.2', simplify(1.2))
+    call CheckDefExecAndScriptFailure(['echo simplify(1.2)'], 'E806:')
   endif
 endfunc
 
@@ -815,9 +835,13 @@ endfunc
 func Test_append()
   enew!
   split
-  call append(0, ["foo"])
-  call append(1, [])
-  call append(1, v:_null_list)
+  call assert_equal(0, append(1, []))
+  call assert_equal(0, append(1, v:_null_list))
+  call assert_equal(0, append(0, ["foo"]))
+  call assert_equal(0, append(1, []))
+  call assert_equal(0, append(1, v:_null_list))
+  call assert_equal(0, append(8, []))
+  call assert_equal(0, append(9, v:_null_list))
   call assert_equal(['foo', ''], getline(1, '$'))
   split
   only
@@ -990,6 +1014,7 @@ func Test_matchstrpos()
   call assert_equal(['', -1, -1], matchstrpos('testing', 'ing', 8))
   call assert_equal(['ing', 1, 4, 7], matchstrpos(['vim', 'testing', 'execute'], 'ing'))
   call assert_equal(['', -1, -1, -1], matchstrpos(['vim', 'testing', 'execute'], 'img'))
+  call assert_equal(['', -1, -1], matchstrpos(v:_null_list, '\a'))
 endfunc
 
 func Test_nextnonblank_prevnonblank()
@@ -1063,19 +1088,14 @@ func Test_byte2line_line2byte()
   bw!
 endfunc
 
-" Test for byteidx() and byteidxcomp() functions
+" Test for byteidx() using a character index
 func Test_byteidx()
   let a = '.é.' " one char of two bytes
   call assert_equal(0, byteidx(a, 0))
-  call assert_equal(0, byteidxcomp(a, 0))
   call assert_equal(1, byteidx(a, 1))
-  call assert_equal(1, byteidxcomp(a, 1))
   call assert_equal(3, byteidx(a, 2))
-  call assert_equal(3, byteidxcomp(a, 2))
   call assert_equal(4, byteidx(a, 3))
-  call assert_equal(4, byteidxcomp(a, 3))
   call assert_equal(-1, byteidx(a, 4))
-  call assert_equal(-1, byteidxcomp(a, 4))
 
   let b = '.é.' " normal e with composing char
   call assert_equal(0, b->byteidx(0))
@@ -1083,42 +1103,482 @@ func Test_byteidx()
   call assert_equal(4, b->byteidx(2))
   call assert_equal(5, b->byteidx(3))
   call assert_equal(-1, b->byteidx(4))
-  call assert_fails("call byteidx([], 0)", 'E730:')
 
+  " string with multiple composing characters
+  let str = '-ą́-ą́'
+  call assert_equal(0, byteidx(str, 0))
+  call assert_equal(1, byteidx(str, 1))
+  call assert_equal(6, byteidx(str, 2))
+  call assert_equal(7, byteidx(str, 3))
+  call assert_equal(12, byteidx(str, 4))
+  call assert_equal(-1, byteidx(str, 5))
+
+  " empty string
+  call assert_equal(0, byteidx('', 0))
+  call assert_equal(-1, byteidx('', 1))
+
+  " error cases
+  call assert_fails("call byteidx([], 0)", 'E730:')
+  call assert_fails("call byteidx('abc', [])", 'E745:')
+  call assert_fails("call byteidx('abc', 0, {})", ['E728:', 'E728:'])
+  call assert_fails("call byteidx('abc', 0, -1)", ['E1023:', 'E1023:'])
+endfunc
+
+" Test for byteidxcomp() using a character index
+func Test_byteidxcomp()
+  let a = '.é.' " one char of two bytes
+  call assert_equal(0, byteidxcomp(a, 0))
+  call assert_equal(1, byteidxcomp(a, 1))
+  call assert_equal(3, byteidxcomp(a, 2))
+  call assert_equal(4, byteidxcomp(a, 3))
+  call assert_equal(-1, byteidxcomp(a, 4))
+
+  let b = '.é.' " normal e with composing char
   call assert_equal(0, b->byteidxcomp(0))
   call assert_equal(1, b->byteidxcomp(1))
   call assert_equal(2, b->byteidxcomp(2))
   call assert_equal(4, b->byteidxcomp(3))
   call assert_equal(5, b->byteidxcomp(4))
   call assert_equal(-1, b->byteidxcomp(5))
+
+  " string with multiple composing characters
+  let str = '-ą́-ą́'
+  call assert_equal(0, byteidxcomp(str, 0))
+  call assert_equal(1, byteidxcomp(str, 1))
+  call assert_equal(2, byteidxcomp(str, 2))
+  call assert_equal(4, byteidxcomp(str, 3))
+  call assert_equal(6, byteidxcomp(str, 4))
+  call assert_equal(7, byteidxcomp(str, 5))
+  call assert_equal(8, byteidxcomp(str, 6))
+  call assert_equal(10, byteidxcomp(str, 7))
+  call assert_equal(12, byteidxcomp(str, 8))
+  call assert_equal(-1, byteidxcomp(str, 9))
+
+  " empty string
+  call assert_equal(0, byteidxcomp('', 0))
+  call assert_equal(-1, byteidxcomp('', 1))
+
+  " error cases
   call assert_fails("call byteidxcomp([], 0)", 'E730:')
+  call assert_fails("call byteidxcomp('abc', [])", 'E745:')
+  call assert_fails("call byteidxcomp('abc', 0, {})", ['E728:', 'E728:'])
+  call assert_fails("call byteidxcomp('abc', 0, -1)", ['E1023:', 'E1023:'])
 endfunc
 
-" Test for charidx()
+" Test for byteidx() using a UTF-16 index
+func Test_byteidx_from_utf16_index()
+  " string with single byte characters
+  let str = "abc"
+  for i in range(3)
+    call assert_equal(i, byteidx(str, i, v:true))
+  endfor
+  call assert_equal(3, byteidx(str, 3, v:true))
+  call assert_equal(-1, byteidx(str, 4, v:true))
+
+  " string with two byte characters
+  let str = "a©©b"
+  call assert_equal(0, byteidx(str, 0, v:true))
+  call assert_equal(1, byteidx(str, 1, v:true))
+  call assert_equal(3, byteidx(str, 2, v:true))
+  call assert_equal(5, byteidx(str, 3, v:true))
+  call assert_equal(6, byteidx(str, 4, v:true))
+  call assert_equal(-1, byteidx(str, 5, v:true))
+
+  " string with two byte characters
+  let str = "a😊😊b"
+  call assert_equal(0, byteidx(str, 0, v:true))
+  call assert_equal(1, byteidx(str, 1, v:true))
+  call assert_equal(1, byteidx(str, 2, v:true))
+  call assert_equal(5, byteidx(str, 3, v:true))
+  call assert_equal(5, byteidx(str, 4, v:true))
+  call assert_equal(9, byteidx(str, 5, v:true))
+  call assert_equal(10, byteidx(str, 6, v:true))
+  call assert_equal(-1, byteidx(str, 7, v:true))
+
+  " string with composing characters
+  let str = '-á-b́'
+  call assert_equal(0, byteidx(str, 0, v:true))
+  call assert_equal(1, byteidx(str, 1, v:true))
+  call assert_equal(4, byteidx(str, 2, v:true))
+  call assert_equal(5, byteidx(str, 3, v:true))
+  call assert_equal(8, byteidx(str, 4, v:true))
+  call assert_equal(-1, byteidx(str, 5, v:true))
+
+  " string with multiple composing characters
+  let str = '-ą́-ą́'
+  call assert_equal(0, byteidx(str, 0, v:true))
+  call assert_equal(1, byteidx(str, 1, v:true))
+  call assert_equal(6, byteidx(str, 2, v:true))
+  call assert_equal(7, byteidx(str, 3, v:true))
+  call assert_equal(12, byteidx(str, 4, v:true))
+  call assert_equal(-1, byteidx(str, 5, v:true))
+
+  " empty string
+  call assert_equal(0, byteidx('', 0, v:true))
+  call assert_equal(-1, byteidx('', 1, v:true))
+
+  " error cases
+  call assert_fails('call byteidx(str, 0, [])', 'E745:')
+endfunc
+
+" Test for byteidxcomp() using a UTF-16 index
+func Test_byteidxcomp_from_utf16_index()
+  " string with single byte characters
+  let str = "abc"
+  for i in range(3)
+    call assert_equal(i, byteidxcomp(str, i, v:true))
+  endfor
+  call assert_equal(3, byteidxcomp(str, 3, v:true))
+  call assert_equal(-1, byteidxcomp(str, 4, v:true))
+
+  " string with two byte characters
+  let str = "a©©b"
+  call assert_equal(0, byteidxcomp(str, 0, v:true))
+  call assert_equal(1, byteidxcomp(str, 1, v:true))
+  call assert_equal(3, byteidxcomp(str, 2, v:true))
+  call assert_equal(5, byteidxcomp(str, 3, v:true))
+  call assert_equal(6, byteidxcomp(str, 4, v:true))
+  call assert_equal(-1, byteidxcomp(str, 5, v:true))
+
+  " string with two byte characters
+  let str = "a😊😊b"
+  call assert_equal(0, byteidxcomp(str, 0, v:true))
+  call assert_equal(1, byteidxcomp(str, 1, v:true))
+  call assert_equal(1, byteidxcomp(str, 2, v:true))
+  call assert_equal(5, byteidxcomp(str, 3, v:true))
+  call assert_equal(5, byteidxcomp(str, 4, v:true))
+  call assert_equal(9, byteidxcomp(str, 5, v:true))
+  call assert_equal(10, byteidxcomp(str, 6, v:true))
+  call assert_equal(-1, byteidxcomp(str, 7, v:true))
+
+  " string with composing characters
+  let str = '-á-b́'
+  call assert_equal(0, byteidxcomp(str, 0, v:true))
+  call assert_equal(1, byteidxcomp(str, 1, v:true))
+  call assert_equal(2, byteidxcomp(str, 2, v:true))
+  call assert_equal(4, byteidxcomp(str, 3, v:true))
+  call assert_equal(5, byteidxcomp(str, 4, v:true))
+  call assert_equal(6, byteidxcomp(str, 5, v:true))
+  call assert_equal(8, byteidxcomp(str, 6, v:true))
+  call assert_equal(-1, byteidxcomp(str, 7, v:true))
+  call assert_fails('call byteidxcomp(str, 0, [])', 'E745:')
+
+  " string with multiple composing characters
+  let str = '-ą́-ą́'
+  call assert_equal(0, byteidxcomp(str, 0, v:true))
+  call assert_equal(1, byteidxcomp(str, 1, v:true))
+  call assert_equal(2, byteidxcomp(str, 2, v:true))
+  call assert_equal(4, byteidxcomp(str, 3, v:true))
+  call assert_equal(6, byteidxcomp(str, 4, v:true))
+  call assert_equal(7, byteidxcomp(str, 5, v:true))
+  call assert_equal(8, byteidxcomp(str, 6, v:true))
+  call assert_equal(10, byteidxcomp(str, 7, v:true))
+  call assert_equal(12, byteidxcomp(str, 8, v:true))
+  call assert_equal(-1, byteidxcomp(str, 9, v:true))
+
+  " empty string
+  call assert_equal(0, byteidxcomp('', 0, v:true))
+  call assert_equal(-1, byteidxcomp('', 1, v:true))
+
+  " error cases
+  call assert_fails('call byteidxcomp(str, 0, [])', 'E745:')
+endfunc
+
+" Test for charidx() using a byte index
 func Test_charidx()
   let a = 'xáb́y'
   call assert_equal(0, charidx(a, 0))
   call assert_equal(1, charidx(a, 3))
   call assert_equal(2, charidx(a, 4))
   call assert_equal(3, charidx(a, 7))
-  call assert_equal(-1, charidx(a, 8))
+  call assert_equal(4, charidx(a, 8))
+  call assert_equal(-1, charidx(a, 9))
   call assert_equal(-1, charidx(a, -1))
-  call assert_equal(-1, charidx('', 0))
-  call assert_equal(-1, charidx(v:_null_string, 0))
 
   " count composing characters
-  call assert_equal(0, charidx(a, 0, 1))
-  call assert_equal(2, charidx(a, 2, 1))
-  call assert_equal(3, charidx(a, 4, 1))
-  call assert_equal(5, charidx(a, 7, 1))
-  call assert_equal(-1, charidx(a, 8, 1))
-  call assert_equal(-1, charidx('', 0, 1))
+  call assert_equal(0, a->charidx(0, 1))
+  call assert_equal(2, a->charidx(2, 1))
+  call assert_equal(3, a->charidx(4, 1))
+  call assert_equal(5, a->charidx(7, 1))
+  call assert_equal(6, a->charidx(8, 1))
+  call assert_equal(-1, a->charidx(9, 1))
 
-  call assert_fails('let x = charidx([], 1)', 'E474:')
-  call assert_fails('let x = charidx("abc", [])', 'E474:')
-  call assert_fails('let x = charidx("abc", 1, [])', 'E474:')
-  call assert_fails('let x = charidx("abc", 1, -1)', 'E1023:')
-  call assert_fails('let x = charidx("abc", 1, 2)', 'E1023:')
+  " empty string
+  call assert_equal(0, charidx('', 0))
+  call assert_equal(-1, charidx('', 1))
+  call assert_equal(0, charidx('', 0, 1))
+  call assert_equal(-1, charidx('', 1, 1))
+
+  " error cases
+  call assert_equal(0, charidx(v:_null_string, 0))
+  call assert_equal(-1, charidx(v:_null_string, 1))
+  call assert_fails('let x = charidx([], 1)', 'E1174:')
+  call assert_fails('let x = charidx("abc", [])', 'E1210:')
+  call assert_fails('let x = charidx("abc", 1, [])', 'E1212:')
+  call assert_fails('let x = charidx("abc", 1, -1)', 'E1212:')
+  call assert_fails('let x = charidx("abc", 1, 2)', 'E1212:')
+endfunc
+
+" Test for charidx() using a UTF-16 index
+func Test_charidx_from_utf16_index()
+  " string with single byte characters
+  let str = "abc"
+  for i in range(4)
+    call assert_equal(i, charidx(str, i, v:false, v:true))
+  endfor
+  call assert_equal(-1, charidx(str, 4, v:false, v:true))
+
+  " string with two byte characters
+  let str = "a©©b"
+  call assert_equal(0, charidx(str, 0, v:false, v:true))
+  call assert_equal(1, charidx(str, 1, v:false, v:true))
+  call assert_equal(2, charidx(str, 2, v:false, v:true))
+  call assert_equal(3, charidx(str, 3, v:false, v:true))
+  call assert_equal(4, charidx(str, 4, v:false, v:true))
+  call assert_equal(-1, charidx(str, 5, v:false, v:true))
+
+  " string with four byte characters
+  let str = "a😊😊b"
+  call assert_equal(0, charidx(str, 0, v:false, v:true))
+  call assert_equal(1, charidx(str, 1, v:false, v:true))
+  call assert_equal(1, charidx(str, 2, v:false, v:true))
+  call assert_equal(2, charidx(str, 3, v:false, v:true))
+  call assert_equal(2, charidx(str, 4, v:false, v:true))
+  call assert_equal(3, charidx(str, 5, v:false, v:true))
+  call assert_equal(4, charidx(str, 6, v:false, v:true))
+  call assert_equal(-1, charidx(str, 7, v:false, v:true))
+
+  " string with composing characters
+  let str = '-á-b́'
+  for i in str->strcharlen()->range()
+    call assert_equal(i, charidx(str, i, v:false, v:true))
+  endfor
+  call assert_equal(4, charidx(str, 4, v:false, v:true))
+  call assert_equal(-1, charidx(str, 5, v:false, v:true))
+  for i in str->strchars()->range()
+    call assert_equal(i, charidx(str, i, v:true, v:true))
+  endfor
+  call assert_equal(6, charidx(str, 6, v:true, v:true))
+  call assert_equal(-1, charidx(str, 7, v:true, v:true))
+
+  " string with multiple composing characters
+  let str = '-ą́-ą́'
+  for i in str->strcharlen()->range()
+    call assert_equal(i, charidx(str, i, v:false, v:true))
+  endfor
+  call assert_equal(4, charidx(str, 4, v:false, v:true))
+  call assert_equal(-1, charidx(str, 5, v:false, v:true))
+  for i in str->strchars()->range()
+    call assert_equal(i, charidx(str, i, v:true, v:true))
+  endfor
+  call assert_equal(8, charidx(str, 8, v:true, v:true))
+  call assert_equal(-1, charidx(str, 9, v:true, v:true))
+
+  " empty string
+  call assert_equal(0, charidx('', 0, v:false, v:true))
+  call assert_equal(-1, charidx('', 1, v:false, v:true))
+  call assert_equal(0, charidx('', 0, v:true, v:true))
+  call assert_equal(-1, charidx('', 1, v:true, v:true))
+
+  " error cases
+  call assert_equal(0, charidx('', 0, v:false, v:true))
+  call assert_equal(-1, charidx('', 1, v:false, v:true))
+  call assert_equal(0, charidx('', 0, v:true, v:true))
+  call assert_equal(-1, charidx('', 1, v:true, v:true))
+  call assert_equal(0, charidx(v:_null_string, 0, v:false, v:true))
+  call assert_equal(-1, charidx(v:_null_string, 1, v:false, v:true))
+  call assert_fails('let x = charidx("abc", 1, v:false, [])', 'E1212:')
+  call assert_fails('let x = charidx("abc", 1, v:true, [])', 'E1212:')
+endfunc
+
+" Test for utf16idx() using a byte index
+func Test_utf16idx_from_byteidx()
+  " UTF-16 index of a string with single byte characters
+  let str = "abc"
+  for i in range(4)
+    call assert_equal(i, utf16idx(str, i))
+  endfor
+  call assert_equal(-1, utf16idx(str, 4))
+
+  " UTF-16 index of a string with two byte characters
+  let str = 'a©©b'
+  call assert_equal(0, str->utf16idx(0))
+  call assert_equal(1, str->utf16idx(1))
+  call assert_equal(1, str->utf16idx(2))
+  call assert_equal(2, str->utf16idx(3))
+  call assert_equal(2, str->utf16idx(4))
+  call assert_equal(3, str->utf16idx(5))
+  call assert_equal(4, str->utf16idx(6))
+  call assert_equal(-1, str->utf16idx(7))
+
+  " UTF-16 index of a string with four byte characters
+  let str = 'a😊😊b'
+  call assert_equal(0, utf16idx(str, 0))
+  call assert_equal(1, utf16idx(str, 1))
+  call assert_equal(1, utf16idx(str, 2))
+  call assert_equal(1, utf16idx(str, 3))
+  call assert_equal(1, utf16idx(str, 4))
+  call assert_equal(3, utf16idx(str, 5))
+  call assert_equal(3, utf16idx(str, 6))
+  call assert_equal(3, utf16idx(str, 7))
+  call assert_equal(3, utf16idx(str, 8))
+  call assert_equal(5, utf16idx(str, 9))
+  call assert_equal(6, utf16idx(str, 10))
+  call assert_equal(-1, utf16idx(str, 11))
+
+  " UTF-16 index of a string with composing characters
+  let str = '-á-b́'
+  call assert_equal(0, utf16idx(str, 0))
+  call assert_equal(1, utf16idx(str, 1))
+  call assert_equal(1, utf16idx(str, 2))
+  call assert_equal(1, utf16idx(str, 3))
+  call assert_equal(2, utf16idx(str, 4))
+  call assert_equal(3, utf16idx(str, 5))
+  call assert_equal(3, utf16idx(str, 6))
+  call assert_equal(3, utf16idx(str, 7))
+  call assert_equal(4, utf16idx(str, 8))
+  call assert_equal(-1, utf16idx(str, 9))
+  call assert_equal(0, utf16idx(str, 0, v:true))
+  call assert_equal(1, utf16idx(str, 1, v:true))
+  call assert_equal(2, utf16idx(str, 2, v:true))
+  call assert_equal(2, utf16idx(str, 3, v:true))
+  call assert_equal(3, utf16idx(str, 4, v:true))
+  call assert_equal(4, utf16idx(str, 5, v:true))
+  call assert_equal(5, utf16idx(str, 6, v:true))
+  call assert_equal(5, utf16idx(str, 7, v:true))
+  call assert_equal(6, utf16idx(str, 8, v:true))
+  call assert_equal(-1, utf16idx(str, 9, v:true))
+
+  " string with multiple composing characters
+  let str = '-ą́-ą́'
+  call assert_equal(0, utf16idx(str, 0))
+  call assert_equal(1, utf16idx(str, 1))
+  call assert_equal(1, utf16idx(str, 2))
+  call assert_equal(1, utf16idx(str, 3))
+  call assert_equal(1, utf16idx(str, 4))
+  call assert_equal(1, utf16idx(str, 5))
+  call assert_equal(2, utf16idx(str, 6))
+  call assert_equal(3, utf16idx(str, 7))
+  call assert_equal(3, utf16idx(str, 8))
+  call assert_equal(3, utf16idx(str, 9))
+  call assert_equal(3, utf16idx(str, 10))
+  call assert_equal(3, utf16idx(str, 11))
+  call assert_equal(4, utf16idx(str, 12))
+  call assert_equal(-1, utf16idx(str, 13))
+  call assert_equal(0, utf16idx(str, 0, v:true))
+  call assert_equal(1, utf16idx(str, 1, v:true))
+  call assert_equal(2, utf16idx(str, 2, v:true))
+  call assert_equal(2, utf16idx(str, 3, v:true))
+  call assert_equal(3, utf16idx(str, 4, v:true))
+  call assert_equal(3, utf16idx(str, 5, v:true))
+  call assert_equal(4, utf16idx(str, 6, v:true))
+  call assert_equal(5, utf16idx(str, 7, v:true))
+  call assert_equal(6, utf16idx(str, 8, v:true))
+  call assert_equal(6, utf16idx(str, 9, v:true))
+  call assert_equal(7, utf16idx(str, 10, v:true))
+  call assert_equal(7, utf16idx(str, 11, v:true))
+  call assert_equal(8, utf16idx(str, 12, v:true))
+  call assert_equal(-1, utf16idx(str, 13, v:true))
+
+  " empty string
+  call assert_equal(0, utf16idx('', 0))
+  call assert_equal(-1, utf16idx('', 1))
+  call assert_equal(0, utf16idx('', 0, v:true))
+  call assert_equal(-1, utf16idx('', 1, v:true))
+
+  " error cases
+  call assert_equal(0, utf16idx("", 0))
+  call assert_equal(-1, utf16idx("", 1))
+  call assert_equal(-1, utf16idx("abc", -1))
+  call assert_equal(0, utf16idx(v:_null_string, 0))
+  call assert_equal(-1, utf16idx(v:_null_string, 1))
+  call assert_fails('let l = utf16idx([], 0)', 'E1174:')
+  call assert_fails('let l = utf16idx("ab", [])', 'E1210:')
+  call assert_fails('let l = utf16idx("ab", 0, [])', 'E1212:')
+endfunc
+
+" Test for utf16idx() using a character index
+func Test_utf16idx_from_charidx()
+  let str = "abc"
+  for i in str->strcharlen()->range()
+    call assert_equal(i, utf16idx(str, i, v:false, v:true))
+  endfor
+  call assert_equal(3, utf16idx(str, 3, v:false, v:true))
+  call assert_equal(-1, utf16idx(str, 4, v:false, v:true))
+
+  " UTF-16 index of a string with two byte characters
+  let str = "a©©b"
+  for i in str->strcharlen()->range()
+    call assert_equal(i, utf16idx(str, i, v:false, v:true))
+  endfor
+  call assert_equal(4, utf16idx(str, 4, v:false, v:true))
+  call assert_equal(-1, utf16idx(str, 5, v:false, v:true))
+
+  " UTF-16 index of a string with four byte characters
+  let str = "a😊😊b"
+  call assert_equal(0, utf16idx(str, 0, v:false, v:true))
+  call assert_equal(1, utf16idx(str, 1, v:false, v:true))
+  call assert_equal(3, utf16idx(str, 2, v:false, v:true))
+  call assert_equal(5, utf16idx(str, 3, v:false, v:true))
+  call assert_equal(6, utf16idx(str, 4, v:false, v:true))
+  call assert_equal(-1, utf16idx(str, 5, v:false, v:true))
+
+  " UTF-16 index of a string with composing characters
+  let str = '-á-b́'
+  for i in str->strcharlen()->range()
+    call assert_equal(i, utf16idx(str, i, v:false, v:true))
+  endfor
+  call assert_equal(4, utf16idx(str, 4, v:false, v:true))
+  call assert_equal(-1, utf16idx(str, 5, v:false, v:true))
+  for i in str->strchars()->range()
+    call assert_equal(i, utf16idx(str, i, v:true, v:true))
+  endfor
+  call assert_equal(6, utf16idx(str, 6, v:true, v:true))
+  call assert_equal(-1, utf16idx(str, 7, v:true, v:true))
+
+  " string with multiple composing characters
+  let str = '-ą́-ą́'
+  for i in str->strcharlen()->range()
+    call assert_equal(i, utf16idx(str, i, v:false, v:true))
+  endfor
+  call assert_equal(4, utf16idx(str, 4, v:false, v:true))
+  call assert_equal(-1, utf16idx(str, 5, v:false, v:true))
+  for i in str->strchars()->range()
+    call assert_equal(i, utf16idx(str, i, v:true, v:true))
+  endfor
+  call assert_equal(8, utf16idx(str, 8, v:true, v:true))
+  call assert_equal(-1, utf16idx(str, 9, v:true, v:true))
+
+  " empty string
+  call assert_equal(0, utf16idx('', 0, v:false, v:true))
+  call assert_equal(-1, utf16idx('', 1, v:false, v:true))
+  call assert_equal(0, utf16idx('', 0, v:true, v:true))
+  call assert_equal(-1, utf16idx('', 1, v:true, v:true))
+
+  " error cases
+  call assert_equal(0, utf16idx(v:_null_string, 0, v:true, v:true))
+  call assert_equal(-1, utf16idx(v:_null_string, 1, v:true, v:true))
+  call assert_fails('let l = utf16idx("ab", 0, v:false, [])', 'E1212:')
+endfunc
+
+" Test for strutf16len()
+func Test_strutf16len()
+  call assert_equal(3, strutf16len('abc'))
+  call assert_equal(3, 'abc'->strutf16len(v:true))
+  call assert_equal(4, strutf16len('a©©b'))
+  call assert_equal(4, strutf16len('a©©b', v:true))
+  call assert_equal(6, strutf16len('a😊😊b'))
+  call assert_equal(6, strutf16len('a😊😊b', v:true))
+  call assert_equal(4, strutf16len('-á-b́'))
+  call assert_equal(6, strutf16len('-á-b́', v:true))
+  call assert_equal(4, strutf16len('-ą́-ą́'))
+  call assert_equal(8, strutf16len('-ą́-ą́', v:true))
+  call assert_equal(0, strutf16len(''))
+
+  " error cases
+  call assert_fails('let l = strutf16len([])', 'E1174:')
+  call assert_fails('let l = strutf16len("a", [])', 'E1212:')
+  call assert_equal(0, strutf16len(v:_null_string))
 endfunc
 
 func Test_count()
@@ -1171,7 +1631,8 @@ func Test_count()
   call assert_equal(2, count("fooooo", "oo"))
   call assert_equal(0, count("foo", ""))
 
-  call assert_fails('call count(0, 0)', 'E712:')
+  call assert_fails('call count(0, 0)', 'E706:')
+  call assert_fails('call count("", "", {})', ['E728:', 'E728:'])
 endfunc
 
 func Test_changenr()
@@ -1284,6 +1745,7 @@ func Test_hlexists()
   syntax off
 endfunc
 
+" Test for the col() function
 func Test_col()
   new
   call setline(1, 'abcdef')
@@ -1435,6 +1897,8 @@ func Test_inputlist()
   call assert_equal(-2, c)
 
   call assert_fails('call inputlist("")', 'E686:')
+  " Nvim accepts null list as empty list
+  " call assert_fails('call inputlist(v:_null_list)', 'E686:')
 endfunc
 
 func Test_range_inputlist()
@@ -1549,6 +2013,32 @@ func Test_setbufvar_options()
   bwipe!
 endfunc
 
+func Test_setbufvar_keep_window_title()
+  CheckRunVimInTerminal
+  if !has('title') || empty(&t_ts)
+    throw "Skipped: can't get/set title"
+  endif
+
+  let lines =<< trim END
+      set title
+      edit Xa.txt
+      let g:buf = bufadd('Xb.txt')
+      inoremap <F2> <C-R>=setbufvar(g:buf, '&autoindent', 1) ?? ''<CR>
+  END
+  call writefile(lines, 'Xsetbufvar')
+  let buf = RunVimInTerminal('-S Xsetbufvar', {})
+  call WaitForAssert({-> assert_match('Xa.txt', term_gettitle(buf))}, 1000)
+
+  call term_sendkeys(buf, "i\<F2>")
+  call TermWait(buf)
+  call term_sendkeys(buf, "\<Esc>")
+  call TermWait(buf)
+  call assert_match('Xa.txt', term_gettitle(buf))
+
+  call StopVimInTerminal(buf)
+  call delete('Xsetbufvar')
+endfunc
+
 func Test_redo_in_nested_functions()
   nnoremap g. :set opfunc=Operator<CR>g@
   function Operator( type, ... )
@@ -1601,7 +2091,7 @@ func Test_trim()
   call assert_fails('eval trim("  vim  ", " ", [])', 'E745:')
   call assert_fails('eval trim("  vim  ", " ", -1)', 'E475:')
   call assert_fails('eval trim("  vim  ", " ", 3)', 'E475:')
-  call assert_fails('eval trim("  vim  ", 0)', 'E475:')
+  call assert_fails('eval trim("  vim  ", 0)', 'E1174:')
 
   let chars = join(map(range(1, 0x20) + [0xa0], {n -> n->nr2char()}), '')
   call assert_equal("x", trim(chars . "x" . chars))
@@ -2003,8 +2493,24 @@ func Test_call()
   endfunction
   let mydict = {'data': [0, 1, 2, 3], 'len': function("Mylen")}
   eval mydict.len->call([], mydict)->assert_equal(4)
-  call assert_fails("call call('Mylen', [], 0)", 'E715:')
+  call assert_fails("call call('Mylen', [], 0)", 'E1206:')
   call assert_fails('call foo', 'E107:')
+
+  " These once caused a crash.
+  " Nvim doesn't have null functions
+  " call call(test_null_function(), [])
+  " Nvim doesn't have null partials
+  " call call(test_null_partial(), [])
+  " Nvim doesn't have null functions
+  " call assert_fails('call test_null_function()()', 'E1192:')
+  " Nvim doesn't have null partials
+  " call assert_fails('call test_null_partial()()', 'E117:')
+
+  let lines =<< trim END
+      let Time = 'localtime'
+      call Time()
+  END
+  call CheckScriptFailure(lines, 'E1085:')
 endfunc
 
 func Test_char2nr()
@@ -2087,6 +2593,81 @@ func Test_bufadd_bufload()
   bwipe XotherName
   call assert_equal(0, bufexists('someName'))
   call delete('XotherName')
+endfunc
+
+func Test_state()
+  CheckRunVimInTerminal
+
+  let getstate = ":echo 'state: ' .. g:state .. '; mode: ' .. g:mode\<CR>"
+
+  let lines =<< trim END
+	call setline(1, ['one', 'two', 'three'])
+	map ;; gg
+	set complete=.
+	func RunTimer()
+	  call timer_start(10, {id -> execute('let g:state = state()') .. execute('let g:mode = mode()')})
+	endfunc
+	au Filetype foobar let g:state = state()|let g:mode = mode()
+  END
+  call writefile(lines, 'XState')
+  let buf = RunVimInTerminal('-S XState', #{rows: 6})
+
+  " Using a ":" command Vim is busy, thus "S" is returned
+  call term_sendkeys(buf, ":echo 'state: ' .. state() .. '; mode: ' .. mode()\<CR>")
+  call WaitForAssert({-> assert_match('state: S; mode: n', term_getline(buf, 6))}, 1000)
+  call term_sendkeys(buf, ":\<CR>")
+
+  " Using a timer callback
+  call term_sendkeys(buf, ":call RunTimer()\<CR>")
+  call TermWait(buf, 25)
+  call term_sendkeys(buf, getstate)
+  call WaitForAssert({-> assert_match('state: c; mode: n', term_getline(buf, 6))}, 1000)
+
+  " Halfway a mapping
+  call term_sendkeys(buf, ":call RunTimer()\<CR>;")
+  call TermWait(buf, 25)
+  call term_sendkeys(buf, ";")
+  call term_sendkeys(buf, getstate)
+  call WaitForAssert({-> assert_match('state: mSc; mode: n', term_getline(buf, 6))}, 1000)
+
+  " A operator is pending
+  call term_sendkeys(buf, ":call RunTimer()\<CR>y")
+  call TermWait(buf, 25)
+  call term_sendkeys(buf, "y")
+  call term_sendkeys(buf, getstate)
+  call WaitForAssert({-> assert_match('state: oSc; mode: n', term_getline(buf, 6))}, 1000)
+
+  " A register was specified
+  call term_sendkeys(buf, ":call RunTimer()\<CR>\"r")
+  call TermWait(buf, 25)
+  call term_sendkeys(buf, "yy")
+  call term_sendkeys(buf, getstate)
+  call WaitForAssert({-> assert_match('state: oSc; mode: n', term_getline(buf, 6))}, 1000)
+
+  " Insert mode completion (bit slower on Mac)
+  call term_sendkeys(buf, ":call RunTimer()\<CR>Got\<C-N>")
+  call TermWait(buf, 25)
+  call term_sendkeys(buf, "\<Esc>")
+  call term_sendkeys(buf, getstate)
+  call WaitForAssert({-> assert_match('state: aSc; mode: i', term_getline(buf, 6))}, 1000)
+
+  " Autocommand executing
+  call term_sendkeys(buf, ":set filetype=foobar\<CR>")
+  call TermWait(buf, 25)
+  call term_sendkeys(buf, getstate)
+  call WaitForAssert({-> assert_match('state: xS; mode: n', term_getline(buf, 6))}, 1000)
+
+  " Todo: "w" - waiting for ch_evalexpr()
+
+  " messages scrolled
+  call term_sendkeys(buf, ":call RunTimer()\<CR>:echo \"one\\ntwo\\nthree\"\<CR>")
+  call TermWait(buf, 25)
+  call term_sendkeys(buf, "\<CR>")
+  call term_sendkeys(buf, getstate)
+  call WaitForAssert({-> assert_match('state: Scs; mode: r', term_getline(buf, 6))}, 1000)
+
+  call StopVimInTerminal(buf)
+  call delete('XState')
 endfunc
 
 func Test_range()
@@ -2357,6 +2938,16 @@ func Test_garbagecollect_now_fails()
   let v:testing = 1
 endfunc
 
+" Test for echo highlighting
+func Test_echohl()
+  echohl Search
+  echo 'Vim'
+  call assert_equal('Vim', Screenline(&lines))
+  " TODO: How to check the highlight group used by echohl?
+  " ScreenAttrs() returns all zeros.
+  echohl None
+endfunc
+
 " Test for the eval() function
 func Test_eval()
   call assert_fails("call eval('5 a')", 'E488:')
@@ -2405,6 +2996,34 @@ func Test_screen_functions()
   call assert_equal(-1, screenattr(-1, -1))
   call assert_equal(-1, screenchar(-1, -1))
   call assert_equal([], screenchars(-1, -1))
+
+  " Run this in a separate Vim instance to avoid messing up.
+  let after =<< trim [CODE]
+    scriptencoding utf-8
+    call setline(1, '口')
+    redraw
+    call assert_equal(0, screenattr(1, 1))
+    call assert_equal(char2nr('口'), screenchar(1, 1))
+    call assert_equal([char2nr('口')], screenchars(1, 1))
+    call assert_equal('口', screenstring(1, 1))
+    call writefile(v:errors, 'Xresult')
+    qall!
+  [CODE]
+
+  let encodings = ['utf-8', 'cp932', 'cp936', 'cp949', 'cp950']
+  if !has('win32')
+    let encodings += ['euc-jp']
+  endif
+  if has('nvim')
+    let encodings = ['utf-8']
+  endif
+  for enc in encodings
+    let msg = 'enc=' .. enc
+    if RunVim([], after, $'--clean --cmd "set encoding={enc}"')
+      call assert_equal([], readfile('Xresult'), msg)
+    endif
+    call delete('Xresult')
+  endfor
 endfunc
 
 " Test for getcurpos() and setpos()
@@ -2515,6 +3134,18 @@ func Test_glob()
   call assert_fails("call glob('*', 0, {})", 'E728:')
 endfunc
 
+" Test for browse()
+func Test_browse()
+  CheckFeature browse
+  call assert_fails('call browse([], "open", "x", "a.c")', 'E745:')
+endfunc
+
+" Test for browsedir()
+func Test_browsedir()
+  CheckFeature browse
+  call assert_fails('call browsedir("open", [])', 'E730:')
+endfunc
+
 func HasDefault(msg = 'msg')
   return a:msg
 endfunc
@@ -2525,7 +3156,7 @@ endfunc
 
 " Test for gettext()
 func Test_gettext()
-  call assert_fails('call gettext(1)', 'E475:')
+  call assert_fails('call gettext(1)', 'E1174:')
 endfunc
 
 func Test_builtin_check()
@@ -2535,7 +3166,7 @@ func Test_builtin_check()
   call assert_fails('let l:.trim = {x -> " " .. x}', 'E704:')
   let lines =<< trim END
     vim9script
-    var s:trim = (x) => " " .. x
+    var trim = (x) => " " .. x
   END
   call CheckScriptFailure(lines, 'E704:')
 
@@ -2564,5 +3195,82 @@ func Test_builtin_check()
   unlet bar
 endfunc
 
+
+" Test for virtcol()
+func Test_virtcol()
+  new
+  call setline(1, "the\tquick\tbrown\tfox")
+  norm! 4|
+  call assert_equal(8, virtcol('.'))
+  call assert_equal(8, virtcol('.', v:false))
+  call assert_equal([4, 8], virtcol('.', v:true))
+
+  let w = winwidth(0)
+  call setline(2, repeat('a', w + 2))
+  let win_nosbr = win_getid()
+  split
+  setlocal showbreak=!!
+  let win_sbr = win_getid()
+  call assert_equal([w, w], virtcol([2, w], v:true, win_nosbr))
+  call assert_equal([w + 1, w + 1], virtcol([2, w + 1], v:true, win_nosbr))
+  call assert_equal([w + 2, w + 2], virtcol([2, w + 2], v:true, win_nosbr))
+  call assert_equal([w, w], virtcol([2, w], v:true, win_sbr))
+  call assert_equal([w + 3, w + 3], virtcol([2, w + 1], v:true, win_sbr))
+  call assert_equal([w + 4, w + 4], virtcol([2, w + 2], v:true, win_sbr))
+  close
+
+  call assert_equal(0, virtcol(''))
+  call assert_equal([0, 0], virtcol('', v:true))
+  call assert_equal(0, virtcol('.', v:false, 5001))
+  call assert_equal([0, 0], virtcol('.', v:true, 5001))
+
+  bwipe!
+endfunc
+
+func Test_delfunc_while_listing()
+  CheckRunVimInTerminal
+
+  let lines =<< trim END
+      set nocompatible
+      for i in range(1, 999)
+        exe 'func ' .. 'MyFunc' .. i .. '()'
+        endfunc
+      endfor
+      au CmdlineLeave : call timer_start(0, {-> execute('delfunc MyFunc622')})
+  END
+  call writefile(lines, 'Xfunctionclear', 'D')
+  let buf = RunVimInTerminal('-S Xfunctionclear', {'rows': 12})
+
+  " This was using freed memory.  The height of the terminal must be so that
+  " the next function to be listed with "j" is the one that is deleted in the
+  " timer callback, tricky!
+  call term_sendkeys(buf, ":func /MyFunc\<CR>")
+  call TermWait(buf, 50)
+  call term_sendkeys(buf, "j")
+  call TermWait(buf, 50)
+  call term_sendkeys(buf, "\<CR>")
+
+  call StopVimInTerminal(buf)
+endfunc
+
+" Test for the reverse() function with a string
+func Test_string_reverse()
+  let lines =<< trim END
+    call assert_equal('', reverse(v:_null_string))
+    for [s1, s2] in [['', ''], ['a', 'a'], ['ab', 'ba'], ['abc', 'cba'],
+                   \ ['abcd', 'dcba'], ['«-«-»-»', '»-»-«-«'],
+                   \ ['🇦', '🇦'], ['🇦🇧', '🇧🇦'], ['🇦🇧🇨', '🇨🇧🇦'],
+                   \ ['🇦«🇧-🇨»🇩', '🇩»🇨-🇧«🇦']]
+      call assert_equal(s2, reverse(s1))
+    endfor
+  END
+  call CheckLegacyAndVim9Success(lines)
+
+  " test in latin1 encoding
+  let save_enc = &encoding
+  " set encoding=latin1
+  call assert_equal('dcba', reverse('abcd'))
+  let &encoding = save_enc
+endfunc
 
 " vim: shiftwidth=2 sts=2 expandtab

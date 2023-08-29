@@ -16,6 +16,7 @@
 #include "nvim/api/private/converter.h"
 #include "nvim/api/private/defs.h"
 #include "nvim/api/private/helpers.h"
+#include "nvim/api/private/validate.h"
 #include "nvim/ascii.h"
 #include "nvim/buffer_defs.h"
 #include "nvim/eval/typval.h"
@@ -40,10 +41,10 @@
 # include "api/private/ui_events_metadata.generated.h"
 #endif
 
-/// Start block that may cause VimL exceptions while evaluating another code
+/// Start block that may cause Vimscript exceptions while evaluating another code
 ///
-/// Used when caller is supposed to be operating when other VimL code is being
-/// processed and that “other VimL code” must not be affected.
+/// Used when caller is supposed to be operating when other Vimscript code is being
+/// processed and that “other Vimscript code” must not be affected.
 ///
 /// @param[out]  tstate  Location where try state should be saved.
 void try_enter(TryState *const tstate)
@@ -478,6 +479,27 @@ Array string_to_array(const String input, bool crlf)
   return ret;
 }
 
+/// Normalizes 0-based indexes to buffer line numbers.
+int64_t normalize_index(buf_T *buf, int64_t index, bool end_exclusive, bool *oob)
+{
+  assert(buf->b_ml.ml_line_count > 0);
+  int64_t max_index = buf->b_ml.ml_line_count + (int)end_exclusive - 1;
+  // A negative index counts from the bottom.
+  index = index < 0 ? max_index + index + 1 : index;
+
+  // Check for oob and clamp.
+  if (index > max_index) {
+    *oob = true;
+    index = max_index;
+  } else if (index < 0) {
+    *oob = true;
+    index = 0;
+  }
+  // Convert the index to a 1-based line number.
+  index++;
+  return index;
+}
+
 /// Returns a substring of a buffer line
 ///
 /// @param buf          Buffer handle
@@ -495,7 +517,7 @@ String buf_get_text(buf_T *buf, int64_t lnum, int64_t start_col, int64_t end_col
     return rv;
   }
 
-  char *bufstr = ml_get_buf(buf, (linenr_T)lnum, false);
+  char *bufstr = ml_get_buf(buf, (linenr_T)lnum);
   size_t line_length = strlen(bufstr);
 
   start_col = start_col < 0 ? (int64_t)line_length + start_col + 1 : start_col;
@@ -660,10 +682,10 @@ static void init_ui_event_metadata(Dictionary *metadata)
   msgpack_unpacked_destroy(&unpacked);
   PUT(*metadata, "ui_events", ui_events);
   Array ui_options = ARRAY_DICT_INIT;
-  ADD(ui_options, STRING_OBJ(cstr_to_string("rgb")));
+  ADD(ui_options, CSTR_TO_OBJ("rgb"));
   for (UIExtension i = 0; i < kUIExtCount; i++) {
     if (ui_ext_names[i][0] != '_') {
-      ADD(ui_options, STRING_OBJ(cstr_to_string(ui_ext_names[i])));
+      ADD(ui_options, CSTR_TO_OBJ(ui_ext_names[i]));
     }
   }
   PUT(*metadata, "ui_options", ARRAY_OBJ(ui_options));
@@ -692,17 +714,17 @@ static void init_type_metadata(Dictionary *metadata)
   Dictionary buffer_metadata = ARRAY_DICT_INIT;
   PUT(buffer_metadata, "id",
       INTEGER_OBJ(kObjectTypeBuffer - EXT_OBJECT_TYPE_SHIFT));
-  PUT(buffer_metadata, "prefix", STRING_OBJ(cstr_to_string("nvim_buf_")));
+  PUT(buffer_metadata, "prefix", CSTR_TO_OBJ("nvim_buf_"));
 
   Dictionary window_metadata = ARRAY_DICT_INIT;
   PUT(window_metadata, "id",
       INTEGER_OBJ(kObjectTypeWindow - EXT_OBJECT_TYPE_SHIFT));
-  PUT(window_metadata, "prefix", STRING_OBJ(cstr_to_string("nvim_win_")));
+  PUT(window_metadata, "prefix", CSTR_TO_OBJ("nvim_win_"));
 
   Dictionary tabpage_metadata = ARRAY_DICT_INIT;
   PUT(tabpage_metadata, "id",
       INTEGER_OBJ(kObjectTypeTabpage - EXT_OBJECT_TYPE_SHIFT));
-  PUT(tabpage_metadata, "prefix", STRING_OBJ(cstr_to_string("nvim_tabpage_")));
+  PUT(tabpage_metadata, "prefix", CSTR_TO_OBJ("nvim_tabpage_"));
 
   PUT(types, "Buffer", DICTIONARY_OBJ(buffer_metadata));
   PUT(types, "Window", DICTIONARY_OBJ(window_metadata));
@@ -806,7 +828,7 @@ bool api_object_to_bool(Object obj, const char *what, bool nil_value, Error *err
   } else if (obj.type == kObjectTypeInteger) {
     return obj.data.integer;  // C semantics: non-zero int is true
   } else if (obj.type == kObjectTypeNil) {
-    return nil_value;  // caller decides what NIL (missing retval in lua) means
+    return nil_value;  // caller decides what NIL (missing retval in Lua) means
   } else {
     api_set_error(err, kErrorTypeValidation, "%s is not a boolean", what);
     return false;
@@ -894,17 +916,84 @@ free_exit:
   return (HlMessage)KV_INITIAL_VALUE;
 }
 
-bool api_dict_to_keydict(void *rv, field_hash hashy, Dictionary dict, Error *err)
+// see also nlua_pop_keydict for the lua specific implementation
+bool api_dict_to_keydict(void *retval, FieldHashfn hashy, Dictionary dict, Error *err)
 {
   for (size_t i = 0; i < dict.size; i++) {
     String k = dict.items[i].key;
-    Object *field = hashy(rv, k.data, k.size);
+    KeySetLink *field = hashy(k.data, k.size);
     if (!field) {
       api_set_error(err, kErrorTypeValidation, "Invalid key: '%.*s'", (int)k.size, k.data);
       return false;
     }
 
-    *field = dict.items[i].value;
+    if (field->opt_index >= 0) {
+      OptKeySet *ks = (OptKeySet *)retval;
+      ks->is_set_ |= (1ULL << field->opt_index);
+    }
+
+    char *mem = ((char *)retval + field->ptr_off);
+    Object *value = &dict.items[i].value;
+    if (field->type == kObjectTypeNil) {
+      *(Object *)mem = *value;
+    } else if (field->type == kObjectTypeInteger) {
+      VALIDATE_T(field->str, kObjectTypeInteger, value->type, {
+        return false;
+      });
+      *(Integer *)mem = value->data.integer;
+    } else if (field->type == kObjectTypeFloat) {
+      Float *val = (Float *)mem;
+      if (value->type == kObjectTypeInteger) {
+        *val = (Float)value->data.integer;
+      } else {
+        VALIDATE_T(field->str, kObjectTypeFloat, value->type, {
+          return false;
+        });
+        *val = value->data.floating;
+      }
+    } else if (field->type == kObjectTypeBoolean) {
+      // caller should check HAS_KEY to override the nil behavior, or GET_BOOL_OR_TRUE
+      // to directly use true when nil
+      *(Boolean *)mem = api_object_to_bool(*value, field->str, false, err);
+      if (ERROR_SET(err)) {
+        return false;
+      }
+    } else if (field->type == kObjectTypeString) {
+      VALIDATE_T(field->str, kObjectTypeString, value->type, {
+        return false;
+      });
+      *(String *)mem = value->data.string;
+    } else if (field->type == kObjectTypeArray) {
+      VALIDATE_T(field->str, kObjectTypeArray, value->type, {
+        return false;
+      });
+      *(Array *)mem = value->data.array;
+    } else if (field->type == kObjectTypeDictionary) {
+      Dictionary *val = (Dictionary *)mem;
+      // allow empty array as empty dict for lua (directly or via lua-client RPC)
+      if (value->type == kObjectTypeArray && value->data.array.size == 0) {
+        *val = (Dictionary)ARRAY_DICT_INIT;
+      } else if (value->type == kObjectTypeDictionary) {
+        *val = value->data.dictionary;
+      } else {
+        api_err_exp(err, field->str, api_typename(field->type), api_typename(value->type));
+        return false;
+      }
+    } else if (field->type == kObjectTypeBuffer || field->type == kObjectTypeWindow
+               || field->type == kObjectTypeTabpage) {
+      if (value->type == kObjectTypeInteger || value->type == field->type) {
+        *(handle_T *)mem = (handle_T)value->data.integer;
+      } else {
+        api_err_exp(err, field->str, api_typename(field->type), api_typename(value->type));
+        return false;
+      }
+    } else if (field->type == kObjectTypeLuaRef) {
+      api_set_error(err, kErrorTypeValidation, "Invalid key: '%.*s' is only allowed from Lua",
+                    (int)k.size, k.data);
+      return false;
+    } else {
+      abort();
+    }
   }
 
   return true;
@@ -913,7 +1002,18 @@ bool api_dict_to_keydict(void *rv, field_hash hashy, Dictionary dict, Error *err
 void api_free_keydict(void *dict, KeySetLink *table)
 {
   for (size_t i = 0; table[i].str; i++) {
-    api_free_object(*(Object *)((char *)dict + table[i].ptr_off));
+    char *mem = ((char *)dict + table[i].ptr_off);
+    if (table[i].type == kObjectTypeNil) {
+      api_free_object(*(Object *)mem);
+    } else if (table[i].type == kObjectTypeString) {
+      api_free_string(*(String *)mem);
+    } else if (table[i].type == kObjectTypeArray) {
+      api_free_array(*(Array *)mem);
+    } else if (table[i].type == kObjectTypeDictionary) {
+      api_free_dictionary(*(Dictionary *)mem);
+    } else if (table[i].type == kObjectTypeLuaRef) {
+      api_free_luaref(*(LuaRef *)mem);
+    }
   }
 }
 

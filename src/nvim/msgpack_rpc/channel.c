@@ -110,7 +110,7 @@ static void log_client_msg(uint64_t channel_id, bool is_request, const char *nam
 # define log_server_msg(...)
 #endif
 
-static PMap(cstr_t) event_strings = MAP_INIT;
+static Set(cstr_t) event_strings = SET_INIT;
 static msgpack_sbuffer out_buffer;
 
 #ifdef INCLUDE_GENERATED_DECLARATIONS
@@ -254,14 +254,12 @@ void rpc_subscribe(uint64_t id, char *event)
     abort();
   }
 
-  char *event_string = pmap_get(cstr_t)(&event_strings, event);
-
-  if (!event_string) {
-    event_string = xstrdup(event);
-    pmap_put(cstr_t)(&event_strings, event_string, event_string);
+  const char **key_alloc = NULL;
+  if (set_put_ref(cstr_t, &event_strings, event, &key_alloc)) {
+    *key_alloc = xstrdup(event);
   }
 
-  pmap_put(cstr_t)(channel->rpc.subscribed_events, event_string, event_string);
+  set_put(cstr_t, channel->rpc.subscribed_events, *key_alloc);
 }
 
 /// Unsubscribes to event broadcasts
@@ -308,6 +306,17 @@ end:
   channel_decref(channel);
 }
 
+static ChannelCallFrame *find_call_frame(RpcState *rpc, uint32_t request_id)
+{
+  for (size_t i = 0; i < kv_size(rpc->call_stack); i++) {
+    ChannelCallFrame *frame = kv_Z(rpc->call_stack, i);
+    if (frame->request_id == request_id) {
+      return frame;
+    }
+  }
+  return NULL;
+}
+
 static void parse_msgpack(Channel *channel)
 {
   Unpacker *p = channel->rpc.unpacker;
@@ -323,13 +332,15 @@ static void parse_msgpack(Channel *channel)
       }
       arena_mem_free(arena_finish(&p->arena));
     } else if (p->type == kMessageTypeResponse) {
-      ChannelCallFrame *frame = kv_last(channel->rpc.call_stack);
-      if (p->request_id != frame->request_id) {
+      ChannelCallFrame *frame = channel->rpc.client_type == kClientTypeMsgpackRpc
+        ? find_call_frame(&channel->rpc, p->request_id)
+        : kv_last(channel->rpc.call_stack);
+      if (frame == NULL || p->request_id != frame->request_id) {
         char buf[256];
         snprintf(buf, sizeof(buf),
-                 "ch %" PRIu64 " returned a response with an unknown request "
-                 "id. Ensure the client is properly synchronized",
-                 channel->id);
+                 "ch %" PRIu64 " (type=%" PRIu32 ") returned a response with an unknown request "
+                 "id %" PRIu32 ". Ensure the client is properly synchronized",
+                 channel->id, (unsigned)channel->rpc.client_type, p->request_id);
         chan_close_with_error(channel, buf, LOGLVL_ERR);
       }
       frame->returned = true;
@@ -553,9 +564,9 @@ static void broadcast_event(const char *name, Array args)
   kvec_t(Channel *) subscribed = KV_INITIAL_VALUE;
   Channel *channel;
 
-  map_foreach_value(&channels, channel, {
+  pmap_foreach_value(&channels, channel, {
     if (channel->is_rpc
-        && pmap_has(cstr_t)(channel->rpc.subscribed_events, name)) {
+        && set_has(cstr_t, channel->rpc.subscribed_events, name)) {
       kv_push(subscribed, channel);
     }
   });
@@ -583,24 +594,12 @@ end:
 
 static void unsubscribe(Channel *channel, char *event)
 {
-  char *event_string = pmap_get(cstr_t)(&event_strings, event);
-  if (!event_string) {
+  if (!set_has(cstr_t, &event_strings, event)) {
     WLOG("RPC: ch %" PRIu64 ": tried to unsubscribe unknown event '%s'",
          channel->id, event);
     return;
   }
-  pmap_del(cstr_t)(channel->rpc.subscribed_events, event_string);
-
-  map_foreach_value(&channels, channel, {
-    if (channel->is_rpc
-        && pmap_has(cstr_t)(channel->rpc.subscribed_events, event_string)) {
-      return;
-    }
-  });
-
-  // Since the string is no longer used by other channels, release it's memory
-  pmap_del(cstr_t)(&event_strings, event_string);
-  xfree(event_string);
+  set_del(cstr_t, channel->rpc.subscribed_events, event);
 }
 
 /// Mark rpc state as closed, and release its reference to the channel.
@@ -630,13 +629,7 @@ void rpc_free(Channel *channel)
   unpacker_teardown(channel->rpc.unpacker);
   xfree(channel->rpc.unpacker);
 
-  // Unsubscribe from all events
-  char *event_string;
-  map_foreach_value(channel->rpc.subscribed_events, event_string, {
-    unsubscribe(channel, event_string);
-  });
-
-  pmap_destroy(cstr_t)(channel->rpc.subscribed_events);
+  set_destroy(cstr_t, channel->rpc.subscribed_events);
   kv_destroy(channel->rpc.call_stack);
   api_free_dictionary(channel->rpc.info);
 }
@@ -648,7 +641,7 @@ static void chan_close_with_error(Channel *channel, char *msg, int loglevel)
     ChannelCallFrame *frame = kv_A(channel->rpc.call_stack, i);
     frame->returned = true;
     frame->errored = true;
-    frame->result = STRING_OBJ(cstr_to_string(msg));
+    frame->result = CSTR_TO_OBJ(msg);
   }
 
   channel_close(channel->id, kChannelPartRpc, NULL);
@@ -685,7 +678,7 @@ static WBuffer *serialize_response(uint64_t channel_id, MsgpackRpcRequestHandler
     } else {
       Array args = ARRAY_DICT_INIT;
       ADD(args, INTEGER_OBJ(err->type));
-      ADD(args, STRING_OBJ(cstr_to_string(err->msg)));
+      ADD(args, CSTR_TO_OBJ(err->msg));
       msgpack_rpc_serialize_request(0, cstr_as_string("nvim_error_event"),
                                     args, &pac);
       api_free_array(args);
@@ -711,6 +704,25 @@ void rpc_set_client_info(uint64_t id, Dictionary info)
 
   api_free_dictionary(chan->rpc.info);
   chan->rpc.info = info;
+
+  // Parse "type" on "info" and set "client_type"
+  const char *type = get_client_info(chan, "type");
+  if (type == NULL || strequal(type, "remote")) {
+    chan->rpc.client_type = kClientTypeRemote;
+  } else if (strequal(type, "msgpack-rpc")) {
+    chan->rpc.client_type = kClientTypeMsgpackRpc;
+  } else if (strequal(type, "ui")) {
+    chan->rpc.client_type = kClientTypeUi;
+  } else if (strequal(type, "embedder")) {
+    chan->rpc.client_type = kClientTypeEmbedder;
+  } else if (strequal(type, "host")) {
+    chan->rpc.client_type = kClientTypeHost;
+  } else if (strequal(type, "plugin")) {
+    chan->rpc.client_type = kClientTypePlugin;
+  } else {
+    chan->rpc.client_type = kClientTypeUnknown;
+  }
+
   channel_info_changed(chan, false);
 }
 
@@ -719,18 +731,28 @@ Dictionary rpc_client_info(Channel *chan)
   return copy_dictionary(chan->rpc.info, NULL);
 }
 
-const char *rpc_client_name(Channel *chan)
+const char *get_client_info(Channel *chan, const char *key)
+  FUNC_ATTR_NONNULL_ALL
 {
   if (!chan->is_rpc) {
     return NULL;
   }
   Dictionary info = chan->rpc.info;
   for (size_t i = 0; i < info.size; i++) {
-    if (strequal("name", info.items[i].key.data)
+    if (strequal(key, info.items[i].key.data)
         && info.items[i].value.type == kObjectTypeString) {
       return info.items[i].value.data.string.data;
     }
   }
 
   return NULL;
+}
+
+void rpc_free_all_mem(void)
+{
+  cstr_t key;
+  set_foreach(&event_strings, key, {
+    xfree((void *)key);
+  });
+  set_destroy(cstr_t, &event_strings);
 }

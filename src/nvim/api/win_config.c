@@ -7,6 +7,7 @@
 #include "klib/kvec.h"
 #include "nvim/api/extmark.h"
 #include "nvim/api/private/defs.h"
+#include "nvim/api/private/dispatch.h"
 #include "nvim/api/private/helpers.h"
 #include "nvim/api/win_config.h"
 #include "nvim/ascii.h"
@@ -108,8 +109,8 @@
 ///     The default value for floats are 50.  In general, values below 100 are
 ///     recommended, unless there is a good reason to overshadow builtin
 ///     elements.
-///   - style: Configure the appearance of the window. Currently only takes
-///       one non-empty value:
+///   - style: (optional) Configure the appearance of the window. Currently
+///       only supports one value:
 ///       - "minimal"  Nvim will display the window with many UI options
 ///                    disabled. This is useful when displaying a temporary
 ///                    float where the text should not be edited. Disables
@@ -144,11 +145,18 @@
 ///     By default, `FloatBorder` highlight is used, which links to `WinSeparator`
 ///     when not defined.  It could also be specified by character:
 ///       [ ["+", "MyCorner"], ["x", "MyBorder"] ].
-///   - title: Title (optional) in window border, String or list.
-///     List is [text, highlight] tuples. if is string the default
-///     highlight group is `FloatTitle`.
-///   - title_pos: Title position must set with title option.
-///     value can be of `left` `center` `right` default is left.
+///   - title: Title (optional) in window border, string or list.
+///     List should consist of `[text, highlight]` tuples.
+///     If string, the default highlight group is `FloatTitle`.
+///   - title_pos: Title position. Must be set with `title` option.
+///     Value can be one of "left", "center", or "right".
+///     Default is `"left"`.
+///   - footer: Footer (optional) in window border, string or list.
+///     List should consist of `[text, highlight]` tuples.
+///     If string, the default highlight group is `FloatFooter`.
+///   - footer_pos: Footer position. Must be set with `footer` option.
+///     Value can be one of "left", "center", or "right".
+///     Default is `"left"`.
 ///   - noautocmd: If true then no buffer-related autocommand events such as
 ///                  |BufEnter|, |BufLeave| or |BufWinEnter| may fire from
 ///                  calling this function.
@@ -158,8 +166,17 @@
 /// @return Window handle, or 0 on error
 Window nvim_open_win(Buffer buffer, Boolean enter, Dict(float_config) *config, Error *err)
   FUNC_API_SINCE(6)
-  FUNC_API_CHECK_TEXTLOCK
+  FUNC_API_TEXTLOCK_ALLOW_CMDWIN
 {
+  buf_T *buf = find_buffer_by_handle(buffer, err);
+  if (!buf) {
+    return 0;
+  }
+  if (cmdwin_type != 0 && (enter || buf == curbuf)) {
+    api_set_error(err, kErrorTypeException, "%s", e_cmdwin);
+    return 0;
+  }
+
   FloatConfig fconfig = FLOAT_CONFIG_INIT;
   if (!parse_float_config(config, &fconfig, false, true, err)) {
     return 0;
@@ -173,7 +190,7 @@ Window nvim_open_win(Buffer buffer, Boolean enter, Dict(float_config) *config, E
   }
   // autocmds in win_enter or win_set_buf below may close the window
   if (win_valid(wp) && buffer > 0) {
-    win_set_buf(wp->handle, buffer, fconfig.noautocmd, err);
+    win_set_buf(wp, buf, fconfig.noautocmd, err);
   }
   if (!win_valid(wp)) {
     api_set_error(err, kErrorTypeException, "Window was closed immediately");
@@ -222,10 +239,62 @@ void nvim_win_set_config(Window window, Dict(float_config) *config, Error *err)
     win_config_float(win, fconfig);
     win->w_pos_changed = true;
   }
-  if (fconfig.style == kWinStyleMinimal) {
-    win_set_minimal_style(win);
-    didset_window_options(win, true);
+  if (HAS_KEY(config, float_config, style)) {
+    if (fconfig.style == kWinStyleMinimal) {
+      win_set_minimal_style(win);
+      didset_window_options(win, true);
+    }
   }
+}
+
+Dictionary config_put_bordertext(Dictionary config, FloatConfig *fconfig,
+                                 BorderTextType bordertext_type)
+{
+  VirtText chunks;
+  AlignTextPos align;
+  char *field_name;
+  char *field_pos_name;
+  switch (bordertext_type) {
+  case kBorderTextTitle:
+    chunks = fconfig->title_chunks;
+    align = fconfig->title_pos;
+    field_name = "title";
+    field_pos_name = "title_pos";
+    break;
+  case kBorderTextFooter:
+    chunks = fconfig->footer_chunks;
+    align = fconfig->footer_pos;
+    field_name = "footer";
+    field_pos_name = "footer_pos";
+    break;
+  }
+
+  Array bordertext = ARRAY_DICT_INIT;
+  for (size_t i = 0; i < chunks.size; i++) {
+    Array tuple = ARRAY_DICT_INIT;
+    ADD(tuple, CSTR_TO_OBJ(chunks.items[i].text));
+    if (chunks.items[i].hl_id > 0) {
+      ADD(tuple, CSTR_TO_OBJ(syn_id2name(chunks.items[i].hl_id)));
+    }
+    ADD(bordertext, ARRAY_OBJ(tuple));
+  }
+  PUT(config, field_name, ARRAY_OBJ(bordertext));
+
+  char *pos;
+  switch (align) {
+  case kAlignLeft:
+    pos = "left";
+    break;
+  case kAlignCenter:
+    pos = "center";
+    break;
+  case kAlignRight:
+    pos = "right";
+    break;
+  }
+  PUT(config, field_pos_name, CSTR_TO_OBJ(pos));
+
+  return config;
 }
 
 /// Gets window configuration.
@@ -265,7 +334,7 @@ Dictionary nvim_win_get_config(Window window, Error *err)
           PUT(rv, "bufpos", ARRAY_OBJ(pos));
         }
       }
-      PUT(rv, "anchor", STRING_OBJ(cstr_to_string(float_anchor_str[config->anchor])));
+      PUT(rv, "anchor", CSTR_TO_OBJ(float_anchor_str[config->anchor]));
       PUT(rv, "row", FLOAT_OBJ(config->row));
       PUT(rv, "col", FLOAT_OBJ(config->col));
       PUT(rv, "zindex", INTEGER_OBJ(config->zindex));
@@ -275,13 +344,13 @@ Dictionary nvim_win_get_config(Window window, Error *err)
       for (size_t i = 0; i < 8; i++) {
         Array tuple = ARRAY_DICT_INIT;
 
-        String s = cstrn_to_string((const char *)config->border_chars[i], sizeof(schar_T));
+        String s = cstrn_to_string(config->border_chars[i], sizeof(schar_T));
 
         int hi_id = config->border_hl_ids[i];
         char *hi_name = syn_id2name(hi_id);
         if (hi_name[0]) {
           ADD(tuple, STRING_OBJ(s));
-          ADD(tuple, STRING_OBJ(cstr_to_string((const char *)hi_name)));
+          ADD(tuple, CSTR_TO_OBJ(hi_name));
           ADD(border, ARRAY_OBJ(tuple));
         } else {
           ADD(border, STRING_OBJ(s));
@@ -289,34 +358,17 @@ Dictionary nvim_win_get_config(Window window, Error *err)
       }
       PUT(rv, "border", ARRAY_OBJ(border));
       if (config->title) {
-        Array titles = ARRAY_DICT_INIT;
-        VirtText title_datas = config->title_chunks;
-        for (size_t i = 0; i < title_datas.size; i++) {
-          Array tuple = ARRAY_DICT_INIT;
-          ADD(tuple, CSTR_TO_OBJ((const char *)title_datas.items[i].text));
-          if (title_datas.items[i].hl_id > 0) {
-            ADD(tuple,
-                STRING_OBJ(cstr_to_string((const char *)syn_id2name(title_datas.items[i].hl_id))));
-          }
-          ADD(titles, ARRAY_OBJ(tuple));
-        }
-        PUT(rv, "title", ARRAY_OBJ(titles));
-        char *title_pos;
-        if (config->title_pos == kAlignLeft) {
-          title_pos = "left";
-        } else if (config->title_pos == kAlignCenter) {
-          title_pos = "center";
-        } else {
-          title_pos = "right";
-        }
-        PUT(rv, "title_pos", CSTR_TO_OBJ(title_pos));
+        rv = config_put_bordertext(rv, config, kBorderTextTitle);
+      }
+      if (config->footer) {
+        rv = config_put_bordertext(rv, config, kBorderTextFooter);
       }
     }
   }
 
   const char *rel = (wp->w_floating && !config->external
                      ? float_relative_str[config->relative] : "");
-  PUT(rv, "relative", STRING_OBJ(cstr_to_string(rel)));
+  PUT(rv, "relative", CSTR_TO_OBJ(rel));
 
   return rv;
 }
@@ -370,68 +422,91 @@ static bool parse_float_bufpos(Array bufpos, lpos_T *out)
   return true;
 }
 
-static void parse_border_title(Object title, Object title_pos, FloatConfig *fconfig, Error *err)
+static void parse_bordertext(Object bordertext, BorderTextType bordertext_type,
+                             FloatConfig *fconfig, Error *err)
 {
-  if (!parse_title_pos(title_pos, fconfig, err)) {
-    return;
+  bool *is_present;
+  VirtText *chunks;
+  int *width;
+  int default_hl_id;
+  switch (bordertext_type) {
+  case kBorderTextTitle:
+    is_present = &fconfig->title;
+    chunks = &fconfig->title_chunks;
+    width = &fconfig->title_width;
+    default_hl_id = syn_check_group(S_LEN("FloatTitle"));
+    break;
+  case kBorderTextFooter:
+    is_present = &fconfig->footer;
+    chunks = &fconfig->footer_chunks;
+    width = &fconfig->footer_width;
+    default_hl_id = syn_check_group(S_LEN("FloatFooter"));
+    break;
   }
 
-  if (title.type == kObjectTypeString) {
-    if (title.data.string.size == 0) {
-      fconfig->title = false;
+  if (bordertext.type == kObjectTypeString) {
+    if (bordertext.data.string.size == 0) {
+      *is_present = false;
       return;
     }
-    int hl_id = syn_check_group(S_LEN("FloatTitle"));
-    kv_push(fconfig->title_chunks, ((VirtTextChunk){ .text = xstrdup(title.data.string.data),
-                                                     .hl_id = hl_id }));
-    fconfig->title_width = (int)mb_string2cells(title.data.string.data);
-    fconfig->title = true;
+    kv_push(*chunks, ((VirtTextChunk){ .text = xstrdup(bordertext.data.string.data),
+                                       .hl_id = default_hl_id }));
+    *width = (int)mb_string2cells(bordertext.data.string.data);
+    *is_present = true;
     return;
   }
 
-  if (title.type != kObjectTypeArray) {
+  if (bordertext.type != kObjectTypeArray) {
     api_set_error(err, kErrorTypeValidation, "title must be string or array");
     return;
   }
 
-  if (title.data.array.size == 0) {
+  if (bordertext.data.array.size == 0) {
     api_set_error(err, kErrorTypeValidation, "title cannot be an empty array");
     return;
   }
 
-  fconfig->title_width = 0;
-  fconfig->title_chunks = parse_virt_text(title.data.array, err, &fconfig->title_width);
+  *width = 0;
+  *chunks = parse_virt_text(bordertext.data.array, err, width);
 
-  fconfig->title = true;
+  *is_present = true;
 }
 
-static bool parse_title_pos(Object title_pos, FloatConfig *fconfig, Error *err)
+static bool parse_bordertext_pos(String bordertext_pos, BorderTextType bordertext_type,
+                                 FloatConfig *fconfig, Error *err)
 {
-  if (!HAS_KEY(title_pos)) {
-    fconfig->title_pos = kAlignLeft;
+  AlignTextPos *align;
+  switch (bordertext_type) {
+  case kBorderTextTitle:
+    align = &fconfig->title_pos;
+    break;
+  case kBorderTextFooter:
+    align = &fconfig->footer_pos;
+    break;
+  }
+
+  if (bordertext_pos.size == 0) {
+    *align = kAlignLeft;
     return true;
   }
 
-  if (title_pos.type != kObjectTypeString) {
-    api_set_error(err, kErrorTypeValidation, "title_pos must be string");
-    return false;
-  }
-
-  if (title_pos.data.string.size == 0) {
-    fconfig->title_pos = kAlignLeft;
-    return true;
-  }
-
-  char *pos = title_pos.data.string.data;
+  char *pos = bordertext_pos.data;
 
   if (strequal(pos, "left")) {
-    fconfig->title_pos = kAlignLeft;
+    *align = kAlignLeft;
   } else if (strequal(pos, "center")) {
-    fconfig->title_pos = kAlignCenter;
+    *align = kAlignCenter;
   } else if (strequal(pos, "right")) {
-    fconfig->title_pos = kAlignRight;
+    *align = kAlignRight;
   } else {
-    api_set_error(err, kErrorTypeValidation, "invalid title_pos value");
+    switch (bordertext_type) {
+    case kBorderTextTitle:
+      api_set_error(err, kErrorTypeValidation, "invalid title_pos value");
+      break;
+    case kBorderTextFooter:
+      api_set_error(err, kErrorTypeValidation, "invalid footer_pos value");
+      break;
+    }
     return false;
   }
   return true;
@@ -521,8 +596,9 @@ static void parse_border_style(Object style,  FloatConfig *fconfig, Error *err)
     String str = style.data.string;
     if (str.size == 0 || strequal(str.data, "none")) {
       fconfig->border = false;
-      // title does not work with border equal none
+      // border text does not work with border equal none
       fconfig->title = false;
+      fconfig->footer = false;
       return;
     }
     for (size_t i = 0; defaults[i].name; i++) {
@@ -549,110 +625,90 @@ static void parse_border_style(Object style,  FloatConfig *fconfig, Error *err)
 static bool parse_float_config(Dict(float_config) *config, FloatConfig *fconfig, bool reconf,
                                bool new_win, Error *err)
 {
+#define HAS_KEY_X(d, key) HAS_KEY(d, float_config, key)
   bool has_relative = false, relative_is_win = false;
-  if (config->relative.type == kObjectTypeString) {
-    // ignore empty string, to match nvim_win_get_config
-    if (config->relative.data.string.size > 0) {
-      if (!parse_float_relative(config->relative.data.string, &fconfig->relative)) {
-        api_set_error(err, kErrorTypeValidation, "Invalid value of 'relative' key");
-        return false;
-      }
-
-      if (!(HAS_KEY(config->row) && HAS_KEY(config->col)) && !HAS_KEY(config->bufpos)) {
-        api_set_error(err, kErrorTypeValidation,
-                      "'relative' requires 'row'/'col' or 'bufpos'");
-        return false;
-      }
-
-      has_relative = true;
-      fconfig->external = false;
-      if (fconfig->relative == kFloatRelativeWindow) {
-        relative_is_win = true;
-        fconfig->bufpos.lnum = -1;
-      }
+  // ignore empty string, to match nvim_win_get_config
+  if (HAS_KEY_X(config, relative) && config->relative.size > 0) {
+    if (!parse_float_relative(config->relative, &fconfig->relative)) {
+      api_set_error(err, kErrorTypeValidation, "Invalid value of 'relative' key");
+      return false;
     }
-  } else if (HAS_KEY(config->relative)) {
-    api_set_error(err, kErrorTypeValidation, "'relative' key must be String");
-    return false;
+
+    if (!(HAS_KEY_X(config, row) && HAS_KEY_X(config, col)) && !HAS_KEY_X(config, bufpos)) {
+      api_set_error(err, kErrorTypeValidation,
+                    "'relative' requires 'row'/'col' or 'bufpos'");
+      return false;
+    }
+
+    has_relative = true;
+    fconfig->external = false;
+    if (fconfig->relative == kFloatRelativeWindow) {
+      relative_is_win = true;
+      fconfig->bufpos.lnum = -1;
+    }
   }
 
-  if (config->anchor.type == kObjectTypeString) {
-    if (!parse_float_anchor(config->anchor.data.string, &fconfig->anchor)) {
+  if (HAS_KEY_X(config, anchor)) {
+    if (!parse_float_anchor(config->anchor, &fconfig->anchor)) {
       api_set_error(err, kErrorTypeValidation, "Invalid value of 'anchor' key");
       return false;
     }
-  } else if (HAS_KEY(config->anchor)) {
-    api_set_error(err, kErrorTypeValidation, "'anchor' key must be String");
-    return false;
   }
 
-  if (HAS_KEY(config->row)) {
+  if (HAS_KEY_X(config, row)) {
     if (!has_relative) {
       api_set_error(err, kErrorTypeValidation, "non-float cannot have 'row'");
       return false;
-    } else if (config->row.type == kObjectTypeInteger) {
-      fconfig->row = (double)config->row.data.integer;
-    } else if (config->row.type == kObjectTypeFloat) {
-      fconfig->row = config->row.data.floating;
-    } else {
-      api_set_error(err, kErrorTypeValidation,
-                    "'row' key must be Integer or Float");
-      return false;
     }
+    fconfig->row = config->row;
   }
 
-  if (HAS_KEY(config->col)) {
+  if (HAS_KEY_X(config, col)) {
     if (!has_relative) {
       api_set_error(err, kErrorTypeValidation, "non-float cannot have 'col'");
       return false;
-    } else if (config->col.type == kObjectTypeInteger) {
-      fconfig->col = (double)config->col.data.integer;
-    } else if (config->col.type == kObjectTypeFloat) {
-      fconfig->col = config->col.data.floating;
-    } else {
-      api_set_error(err, kErrorTypeValidation,
-                    "'col' key must be Integer or Float");
-      return false;
     }
+    fconfig->col = config->col;
   }
 
-  if (HAS_KEY(config->bufpos)) {
+  if (HAS_KEY_X(config, bufpos)) {
     if (!has_relative) {
       api_set_error(err, kErrorTypeValidation, "non-float cannot have 'bufpos'");
       return false;
-    } else if (config->bufpos.type == kObjectTypeArray) {
-      if (!parse_float_bufpos(config->bufpos.data.array, &fconfig->bufpos)) {
+    } else {
+      if (!parse_float_bufpos(config->bufpos, &fconfig->bufpos)) {
         api_set_error(err, kErrorTypeValidation, "Invalid value of 'bufpos' key");
         return false;
       }
 
-      if (!HAS_KEY(config->row)) {
+      if (!HAS_KEY_X(config, row)) {
         fconfig->row = (fconfig->anchor & kFloatAnchorSouth) ? 0 : 1;
       }
-      if (!HAS_KEY(config->col)) {
+      if (!HAS_KEY_X(config, col)) {
         fconfig->col = 0;
       }
-    } else {
-      api_set_error(err, kErrorTypeValidation, "'bufpos' key must be Array");
-      return false;
     }
   }
 
-  if (config->width.type == kObjectTypeInteger && config->width.data.integer > 0) {
-    fconfig->width = (int)config->width.data.integer;
-  } else if (HAS_KEY(config->width)) {
-    api_set_error(err, kErrorTypeValidation, "'width' key must be a positive Integer");
-    return false;
+  if (HAS_KEY_X(config, width)) {
+    if (config->width > 0) {
+      fconfig->width = (int)config->width;
+    } else {
+      api_set_error(err, kErrorTypeValidation, "'width' key must be a positive Integer");
+      return false;
+    }
   } else if (!reconf) {
     api_set_error(err, kErrorTypeValidation, "Must specify 'width'");
     return false;
   }
 
-  if (config->height.type == kObjectTypeInteger && config->height.data.integer > 0) {
-    fconfig->height = (int)config->height.data.integer;
-  } else if (HAS_KEY(config->height)) {
-    api_set_error(err, kErrorTypeValidation, "'height' key must be a positive Integer");
-    return false;
+  if (HAS_KEY_X(config, height)) {
+    if (config->height > 0) {
+      fconfig->height = (int)config->height;
+    } else {
+      api_set_error(err, kErrorTypeValidation, "'height' key must be a positive Integer");
+      return false;
+    }
   } else if (!reconf) {
     api_set_error(err, kErrorTypeValidation, "Must specify 'height'");
     return false;
@@ -660,26 +716,20 @@ static bool parse_float_config(Dict(float_config) *config, FloatConfig *fconfig,
 
   if (relative_is_win) {
     fconfig->window = curwin->handle;
-    if (config->win.type == kObjectTypeInteger || config->win.type == kObjectTypeWindow) {
-      if (config->win.data.integer > 0) {
-        fconfig->window = (Window)config->win.data.integer;
+    if (HAS_KEY_X(config, win)) {
+      if (config->win > 0) {
+        fconfig->window = config->win;
       }
-    } else if (HAS_KEY(config->win)) {
-      api_set_error(err, kErrorTypeValidation, "'win' key must be Integer or Window");
-      return false;
     }
   } else {
-    if (HAS_KEY(config->win)) {
+    if (HAS_KEY_X(config, win)) {
       api_set_error(err, kErrorTypeValidation, "'win' key is only valid with relative='win'");
       return false;
     }
   }
 
-  if (HAS_KEY(config->external)) {
-    fconfig->external = api_object_to_bool(config->external, "'external' key", false, err);
-    if (ERROR_SET(err)) {
-      return false;
-    }
+  if (HAS_KEY_X(config, external)) {
+    fconfig->external = config->external;
     if (has_relative && fconfig->external) {
       api_set_error(err, kErrorTypeValidation,
                     "Only one of 'relative' and 'external' must be used");
@@ -698,30 +748,22 @@ static bool parse_float_config(Dict(float_config) *config, FloatConfig *fconfig,
     return false;
   }
 
-  if (HAS_KEY(config->focusable)) {
-    fconfig->focusable = api_object_to_bool(config->focusable, "'focusable' key", false, err);
-    if (ERROR_SET(err)) {
+  if (HAS_KEY_X(config, focusable)) {
+    fconfig->focusable = config->focusable;
+  }
+
+  if (HAS_KEY_X(config, zindex)) {
+    if (config->zindex > 0) {
+      fconfig->zindex = (int)config->zindex;
+    } else {
+      api_set_error(err, kErrorTypeValidation, "'zindex' key must be a positive Integer");
       return false;
     }
   }
 
-  if (config->zindex.type == kObjectTypeInteger && config->zindex.data.integer > 0) {
-    fconfig->zindex = (int)config->zindex.data.integer;
-  } else if (HAS_KEY(config->zindex)) {
-    api_set_error(err, kErrorTypeValidation, "'zindex' key must be a positive Integer");
-    return false;
-  }
-
-  if (HAS_KEY(config->title_pos)) {
-    if (!HAS_KEY(config->title)) {
-      api_set_error(err, kErrorTypeException, "title_pos requires title to be set");
-      return false;
-    }
-  }
-
-  if (HAS_KEY(config->title)) {
+  if (HAS_KEY_X(config, title)) {
     // title only work with border
-    if (!HAS_KEY(config->border) && !fconfig->border) {
+    if (!HAS_KEY_X(config, border) && !fconfig->border) {
       api_set_error(err, kErrorTypeException, "title requires border to be set");
       return false;
     }
@@ -729,42 +771,76 @@ static bool parse_float_config(Dict(float_config) *config, FloatConfig *fconfig,
     if (fconfig->title) {
       clear_virttext(&fconfig->title_chunks);
     }
-    parse_border_title(config->title, config->title_pos, fconfig, err);
+
+    parse_bordertext(config->title, kBorderTextTitle, fconfig, err);
     if (ERROR_SET(err)) {
+      return false;
+    }
+
+    // handles unset 'title_pos' same as empty string
+    if (!parse_bordertext_pos(config->title_pos, kBorderTextTitle, fconfig, err)) {
+      return false;
+    }
+  } else {
+    if (HAS_KEY_X(config, title_pos)) {
+      api_set_error(err, kErrorTypeException, "title_pos requires title to be set");
       return false;
     }
   }
 
-  if (HAS_KEY(config->border)) {
+  if (HAS_KEY_X(config, footer)) {
+    // footer only work with border
+    if (!HAS_KEY_X(config, border) && !fconfig->border) {
+      api_set_error(err, kErrorTypeException, "footer requires border to be set");
+      return false;
+    }
+
+    if (fconfig->footer) {
+      clear_virttext(&fconfig->footer_chunks);
+    }
+
+    parse_bordertext(config->footer, kBorderTextFooter, fconfig, err);
+    if (ERROR_SET(err)) {
+      return false;
+    }
+
+    // handles unset 'footer_pos' same as empty string
+    if (!parse_bordertext_pos(config->footer_pos, kBorderTextFooter, fconfig, err)) {
+      return false;
+    }
+  } else {
+    if (HAS_KEY_X(config, footer_pos)) {
+      api_set_error(err, kErrorTypeException, "footer_pos requires footer to be set");
+      return false;
+    }
+  }
+
+  if (HAS_KEY_X(config, border)) {
     parse_border_style(config->border, fconfig, err);
     if (ERROR_SET(err)) {
       return false;
     }
   }
 
-  if (config->style.type == kObjectTypeString) {
-    if (config->style.data.string.data[0] == NUL) {
+  if (HAS_KEY_X(config, style)) {
+    if (config->style.data[0] == NUL) {
       fconfig->style = kWinStyleUnused;
-    } else if (striequal(config->style.data.string.data, "minimal")) {
+    } else if (striequal(config->style.data, "minimal")) {
       fconfig->style = kWinStyleMinimal;
     } else {
       api_set_error(err, kErrorTypeValidation, "Invalid value of 'style' key");
+      return false;
     }
-  } else if (HAS_KEY(config->style)) {
-    api_set_error(err, kErrorTypeValidation, "'style' key must be String");
-    return false;
   }
 
-  if (HAS_KEY(config->noautocmd)) {
+  if (HAS_KEY_X(config, noautocmd)) {
     if (!new_win) {
       api_set_error(err, kErrorTypeValidation, "Invalid key: 'noautocmd'");
       return false;
     }
-    fconfig->noautocmd = api_object_to_bool(config->noautocmd, "'noautocmd' key", false, err);
-    if (ERROR_SET(err)) {
-      return false;
-    }
+    fconfig->noautocmd = config->noautocmd;
   }
 
   return true;
+#undef HAS_KEY_X
 }

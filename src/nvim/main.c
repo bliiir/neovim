@@ -30,6 +30,7 @@
 #include "nvim/eval.h"
 #include "nvim/eval/typval.h"
 #include "nvim/eval/typval_defs.h"
+#include "nvim/eval/userfunc.h"
 #include "nvim/event/multiqueue.h"
 #include "nvim/event/stream.h"
 #include "nvim/ex_cmds.h"
@@ -48,6 +49,7 @@
 #include "nvim/keycodes.h"
 #include "nvim/log.h"
 #include "nvim/lua/executor.h"
+#include "nvim/lua/secure.h"
 #include "nvim/macros.h"
 #include "nvim/main.h"
 #include "nvim/mark.h"
@@ -172,10 +174,9 @@ bool event_teardown(void)
 
 /// Performs early initialization.
 ///
-/// Needed for unit tests. Must be called after `time_init()`.
+/// Needed for unit tests.
 void early_init(mparm_T *paramp)
 {
-  env_init();
   estack_init();
   cmdline_init();
   eval_init();          // init global variables
@@ -249,6 +250,11 @@ int main(int argc, char **argv)
 
   argv0 = argv[0];
 
+  if (!appname_is_valid()) {
+    os_errmsg("$NVIM_APPNAME is not a valid file name.\n");
+    exit(1);
+  }
+
   if (argc > 1 && STRICMP(argv[1], "-ll") == 0) {
     if (argc == 2) {
       print_mainerr(err_arg_missing, argv[1]);
@@ -261,15 +267,10 @@ int main(int argc, char **argv)
   mparm_T params;         // various parameters passed between
                           // main() and other functions.
   char *cwd = NULL;       // current working dir on startup
-  time_init();
 
   // Many variables are in `params` so that we can pass them around easily.
   // `argc` and `argv` are also copied, so that they can be changed.
   init_params(&params, argc, argv);
-
-  // Since os_open is called during the init_startuptime, we need to call
-  // fs_init before it.
-  fs_init();
 
   init_startuptime(&params);
 
@@ -304,6 +305,16 @@ int main(int argc, char **argv)
     }
   }
 
+  if (GARGCOUNT > 0) {
+    fname = get_fname(&params, cwd);
+  }
+
+  // Recovery mode without a file name: List swap files.
+  // In this case, no UI is needed.
+  if (recoverymode && fname == NULL) {
+    headless_mode = true;
+  }
+
 #ifdef MSWIN
   // on windows we use CONIN special file, thus we don't know this yet.
   bool has_term = true;
@@ -333,16 +344,6 @@ int main(int argc, char **argv)
       getout(1);
     }
     ui_client_channel_id = rv;
-  }
-
-  if (GARGCOUNT > 0) {
-    fname = get_fname(&params, cwd);
-  }
-
-  // Recovery mode without a file name: List swap files.
-  // In this case, no UI is needed.
-  if (recoverymode && fname == NULL) {
-    headless_mode = true;
   }
 
   TIME_MSG("expanding arguments");
@@ -448,8 +449,7 @@ int main(int argc, char **argv)
 
   // If using the runtime (-u is not NONE), enable syntax & filetype plugins.
   if (!vimrc_none || params.clean) {
-    // Sources filetype.lua and filetype.vim unless the user explicitly disabled it with :filetype
-    // off.
+    // Sources filetype.lua unless the user explicitly disabled it with :filetype off.
     filetype_maybe_enable();
     // Sources syntax/syntax.vim. We do this *after* the user startup scripts so that users can
     // disable syntax highlighting with `:syntax off` if they wish.
@@ -465,7 +465,7 @@ int main(int argc, char **argv)
   // Recovery mode without a file name: List swap files.
   // Uses the 'dir' option, therefore it must be after the initializations.
   if (recoverymode && fname == NULL) {
-    recover_names(NULL, true, 0, NULL);
+    recover_names(NULL, true, NULL, 0, NULL);
     os_exit(0);
   }
 
@@ -629,8 +629,14 @@ int main(int argc, char **argv)
   }
 
   if (params.luaf != NULL) {
+    // Like "--cmd", "+", "-c" and "-S", don't truncate messages.
+    msg_scroll = true;
     bool lua_ok = nlua_exec_file(params.luaf);
     TIME_MSG("executing Lua -l script");
+    if (msg_didout) {
+      msg_putchar('\n');
+      msg_didout = false;
+    }
     getout(lua_ok ? 0 : 1);
   }
 
@@ -690,8 +696,8 @@ void getout(int exitval)
 
   set_vim_var_nr(VV_EXITING, exitval);
 
-  // Position the cursor on the last screen line, below all the text
-  ui_cursor_goto(Rows - 1, 0);
+  // Invoked all deferred functions in the function stack.
+  invoke_all_defer();
 
   // Optionally print hashtable efficiency.
   hash_debug_results();
@@ -777,9 +783,6 @@ void getout(int exitval)
     // TODO(justinmk): this may call getout(0), clobbering exitval...
     wait_return(false);
   }
-
-  // Position the cursor again, the autocommands may have moved it
-  ui_cursor_goto(Rows - 1, 0);
 
   // Apply 'titleold'.
   if (p_title && *p_titleold != NUL) {
@@ -918,6 +921,11 @@ static void remote_request(mparm_T *params, int remote_args, char *server_addr, 
       os_errmsg(connect_error);
       os_errmsg("\n");
       os_exit(1);
+    } else if (strequal(server_addr, os_getenv("NVIM"))) {
+      os_errmsg("Cannot attach UI of :terminal child to its parent. ");
+      os_errmsg("(Unset $NVIM to skip this check)");
+      os_errmsg("\n");
+      os_exit(1);
     }
 
     ui_client_channel_id = chan;
@@ -956,7 +964,7 @@ static void remote_request(mparm_T *params, int remote_args, char *server_addr, 
   TriState tabbed = kNone;
 
   for (size_t i = 0; i < rvobj.data.dictionary.size; i++) {
-    if (strcmp(rvobj.data.dictionary.items[i].key.data, "errmsg") == 0) {
+    if (strequal(rvobj.data.dictionary.items[i].key.data, "errmsg")) {
       if (rvobj.data.dictionary.items[i].value.type != kObjectTypeString) {
         os_errmsg("vim._cs_remote returned an unexpected type for 'errmsg'\n");
         os_exit(2);
@@ -964,13 +972,19 @@ static void remote_request(mparm_T *params, int remote_args, char *server_addr, 
       os_errmsg(rvobj.data.dictionary.items[i].value.data.string.data);
       os_errmsg("\n");
       os_exit(2);
-    } else if (strcmp(rvobj.data.dictionary.items[i].key.data, "tabbed") == 0) {
+    } else if (strequal(rvobj.data.dictionary.items[i].key.data, "result")) {
+      if (rvobj.data.dictionary.items[i].value.type != kObjectTypeString) {
+        os_errmsg("vim._cs_remote returned an unexpected type for 'result'\n");
+        os_exit(2);
+      }
+      os_msg(rvobj.data.dictionary.items[i].value.data.string.data);
+    } else if (strequal(rvobj.data.dictionary.items[i].key.data, "tabbed")) {
       if (rvobj.data.dictionary.items[i].value.type != kObjectTypeBoolean) {
         os_errmsg("vim._cs_remote returned an unexpected type for 'tabbed'\n");
         os_exit(2);
       }
       tabbed = rvobj.data.dictionary.items[i].value.data.boolean ? kTrue : kFalse;
-    } else if (strcmp(rvobj.data.dictionary.items[i].key.data, "should_exit") == 0) {
+    } else if (strequal(rvobj.data.dictionary.items[i].key.data, "should_exit")) {
       if (rvobj.data.dictionary.items[i].value.type != kObjectTypeBoolean) {
         os_errmsg("vim._cs_remote returned an unexpected type for 'should_exit'\n");
         os_exit(2);
@@ -1064,6 +1078,10 @@ static void command_line_scan(mparm_T *parmp)
           version();
           os_exit(0);
         } else if (STRICMP(argv[0] + argv_idx, "api-info") == 0) {
+#ifdef MSWIN
+          // set stdout to binary to avoid crlf in --api-info output
+          _setmode(STDOUT_FILENO, _O_BINARY);
+#endif
           FileDescriptor fp;
           const int fof_ret = file_open_fd(&fp, STDOUT_FILENO,
                                            kFileWriteOnly);
@@ -1111,7 +1129,7 @@ static void command_line_scan(mparm_T *parmp)
         } else if (STRNICMP(argv[0] + argv_idx, "clean", 5) == 0) {
           parmp->use_vimrc = "NONE";
           parmp->clean = true;
-          set_option_value_give_err("shadafile", 0L, "NONE", 0);
+          set_option_value_give_err("shadafile", STATIC_CSTR_AS_OPTVAL("NONE"), 0);
         } else if (STRNICMP(argv[0] + argv_idx, "luamod-dev", 9) == 0) {
           nlua_disable_preload = true;
         } else {
@@ -1125,7 +1143,7 @@ static void command_line_scan(mparm_T *parmp)
         }
         break;
       case 'A':    // "-A" start in Arabic mode.
-        set_option_value_give_err("arabic", 1L, NULL, 0);
+        set_option_value_give_err("arabic", BOOLEAN_OPTVAL(true), 0);
         break;
       case 'b':    // "-b" binary mode.
         // Needs to be effective before expanding file names, because
@@ -1155,8 +1173,8 @@ static void command_line_scan(mparm_T *parmp)
         usage();
         os_exit(0);
       case 'H':    // "-H" start in Hebrew mode: rl + keymap=hebrew set.
-        set_option_value_give_err("keymap", 0L, "hebrew", 0);
-        set_option_value_give_err("rl", 1L, NULL, 0);
+        set_option_value_give_err("keymap", STATIC_CSTR_AS_OPTVAL("hebrew"), 0);
+        set_option_value_give_err("rl", BOOLEAN_OPTVAL(true), 0);
         break;
       case 'M':    // "-M"  no changes or writing of files
         reset_modifiable();
@@ -1236,7 +1254,7 @@ static void command_line_scan(mparm_T *parmp)
         // default is 10: a little bit verbose
         p_verbose = get_number_arg(argv[0], &argv_idx, 10);
         if (argv[0][argv_idx] != NUL) {
-          set_option_value_give_err("verbosefile", 0L, argv[0] + argv_idx, 0);
+          set_option_value_give_err("verbosefile", CSTR_AS_OPTVAL(argv[0] + argv_idx), 0);
           argv_idx = (int)strlen(argv[0]);
         }
         break;
@@ -1244,7 +1262,7 @@ static void command_line_scan(mparm_T *parmp)
         // "-w {scriptout}" write to script
         if (ascii_isdigit((argv[0])[argv_idx])) {
           n = get_number_arg(argv[0], &argv_idx, 10);
-          set_option_value_give_err("window", n, NULL, 0);
+          set_option_value_give_err("window", NUMBER_OPTVAL(n), 0);
           break;
         }
         want_argument = true;
@@ -1340,7 +1358,7 @@ static void command_line_scan(mparm_T *parmp)
           break;
 
         case 'i':    // "-i {shada}" use for shada
-          set_option_value_give_err("shadafile", 0L, argv[0], 0);
+          set_option_value_give_err("shadafile", CSTR_AS_OPTVAL(argv[0]), 0);
           break;
 
         case 'l':    // "-l" Lua script: args after "-l".
@@ -1350,11 +1368,11 @@ static void command_line_scan(mparm_T *parmp)
           parmp->no_swap_file = true;
           parmp->use_vimrc = parmp->use_vimrc ? parmp->use_vimrc : "NONE";
           if (p_shadafile == NULL || *p_shadafile == NUL) {
-            set_option_value_give_err("shadafile", 0L, "NONE", 0);
+            set_option_value_give_err("shadafile", STATIC_CSTR_AS_OPTVAL("NONE"), 0);
           }
           parmp->luaf = argv[0];
           argc--;
-          if (argc > 0) {  // Lua args after "-l <file>".
+          if (argc >= 0) {  // Lua args after "-l <file>".
             parmp->lua_arg0 = parmp->argc - argc;
             argc = 0;
           }
@@ -1386,7 +1404,7 @@ scripterror:
           if (ascii_isdigit(*(argv[0]))) {
             argv_idx = 0;
             n = get_number_arg(argv[0], &argv_idx, 10);
-            set_option_value_give_err("window", n, NULL, 0);
+            set_option_value_give_err("window", NUMBER_OPTVAL(n), 0);
             argv_idx = -1;
             break;
           }
@@ -1477,7 +1495,7 @@ static void init_startuptime(mparm_T *paramp)
 {
   for (int i = 1; i < paramp->argc - 1; i++) {
     if (STRICMP(paramp->argv[i], "--startuptime") == 0) {
-      time_fd = os_fopen(paramp->argv[i + 1], "a");
+      time_fd = fopen(paramp->argv[i + 1], "a");
       time_start("--- NVIM STARTING ---");
       break;
     }
@@ -1781,7 +1799,7 @@ static void edit_buffers(mparm_T *parmp, char *cwd)
 
           p_shm_save = xstrdup(p_shm);
           snprintf(buf, sizeof(buf), "F%s", p_shm);
-          set_option_value_give_err("shm", 0L, buf, 0);
+          set_option_value_give_err("shm", CSTR_AS_OPTVAL(buf), 0);
         }
       } else {
         if (curwin->w_next == NULL) {           // just checking
@@ -1825,7 +1843,7 @@ static void edit_buffers(mparm_T *parmp, char *cwd)
   }
 
   if (p_shm_save != NULL) {
-    set_option_value_give_err("shm", 0L, p_shm_save, 0);
+    set_option_value_give_err("shm", CSTR_AS_OPTVAL(p_shm_save), 0);
     xfree(p_shm_save);
   }
 
@@ -2122,7 +2140,7 @@ static int execute_env(char *env)
   current_sctx.sc_sid = SID_ENV;
   current_sctx.sc_seq = 0;
   current_sctx.sc_lnum = 0;
-  do_cmdline_cmd((char *)initstr);
+  do_cmdline_cmd(initstr);
 
   estack_pop();
   current_sctx = save_current_sctx;
@@ -2178,43 +2196,33 @@ static void usage(void)
   signal_stop();              // kill us with CTRL-C here, if you like
 
   os_msg(_("Usage:\n"));
-  os_msg(_("  nvim [options] [file ...]      Edit file(s)\n"));
-  os_msg(_("  nvim [options] -t <tag>        Edit file where tag is defined\n"));
-  os_msg(_("  nvim [options] -q [errorfile]  Edit file with first error\n"));
+  os_msg(_("  nvim [options] [file ...]\n"));
   os_msg(_("\nOptions:\n"));
-  os_msg(_("  --                    Only file names after this\n"));
-  os_msg(_("  +                     Start at end of file\n"));
   os_msg(_("  --cmd <cmd>           Execute <cmd> before any config\n"));
   os_msg(_("  +<cmd>, -c <cmd>      Execute <cmd> after config and first file\n"));
   os_msg(_("  -l <script> [args...] Execute Lua <script> (with optional args)\n"));
+  os_msg(_("  -S <session>          Source <session> after loading the first file\n"));
+  os_msg(_("  -s <scriptin>         Read Normal mode commands from <scriptin>\n"));
+  os_msg(_("  -u <config>           Use this config file\n"));
   os_msg("\n");
-  os_msg(_("  -b                    Binary mode\n"));
   os_msg(_("  -d                    Diff mode\n"));
-  os_msg(_("  -e, -E                Ex mode\n"));
   os_msg(_("  -es, -Es              Silent (batch) mode\n"));
   os_msg(_("  -h, --help            Print this help message\n"));
   os_msg(_("  -i <shada>            Use this shada file\n"));
-  os_msg(_("  -m                    Modifications (writing files) not allowed\n"));
-  os_msg(_("  -M                    Modifications in text not allowed\n"));
   os_msg(_("  -n                    No swap file, use memory only\n"));
   os_msg(_("  -o[N]                 Open N windows (default: one per file)\n"));
   os_msg(_("  -O[N]                 Open N vertical windows (default: one per file)\n"));
   os_msg(_("  -p[N]                 Open N tab pages (default: one per file)\n"));
-  os_msg(_("  -r, -L                List swap files\n"));
-  os_msg(_("  -r <file>             Recover edit state for this file\n"));
-  os_msg(_("  -R                    Read-only mode\n"));
-  os_msg(_("  -S <session>          Source <session> after loading the first file\n"));
-  os_msg(_("  -s <scriptin>         Read Normal mode commands from <scriptin>\n"));
-  os_msg(_("  -u <config>           Use this config file\n"));
+  os_msg(_("  -R                    Read-only (view) mode\n"));
   os_msg(_("  -v, --version         Print version information\n"));
   os_msg(_("  -V[N][file]           Verbose [level][file]\n"));
   os_msg("\n");
+  os_msg(_("  --                    Only file names after this\n"));
   os_msg(_("  --api-info            Write msgpack-encoded API metadata to stdout\n"));
   os_msg(_("  --clean               \"Factory defaults\" (skip user config and plugins, shada)\n"));
   os_msg(_("  --embed               Use stdin/stdout as a msgpack-rpc channel\n"));
   os_msg(_("  --headless            Don't start a user interface\n"));
   os_msg(_("  --listen <address>    Serve RPC API from this address\n"));
-  os_msg(_("  --noplugin            Don't load plugins\n"));
   os_msg(_("  --remote[-subcommand] Execute commands remotely on a server\n"));
   os_msg(_("  --server <address>    Specify RPC server to send commands to\n"));
   os_msg(_("  --startuptime <file>  Write startup timing messages to <file>\n"));
@@ -2231,3 +2239,17 @@ static void check_swap_exists_action(void)
   }
   handle_swap_exists(NULL);
 }
+
+#ifdef ENABLE_ASAN_UBSAN
+const char *__ubsan_default_options(void);
+const char *__ubsan_default_options(void)
+{
+  return "print_stacktrace=1";
+}
+
+const char *__asan_default_options(void);
+const char *__asan_default_options(void)
+{
+  return "handle_abort=1,handle_sigill=1";
+}
+#endif

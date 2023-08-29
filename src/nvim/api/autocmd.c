@@ -11,6 +11,7 @@
 #include "lauxlib.h"
 #include "nvim/api/autocmd.h"
 #include "nvim/api/private/defs.h"
+#include "nvim/api/private/dispatch.h"
 #include "nvim/api/private/helpers.h"
 #include "nvim/api/private/validate.h"
 #include "nvim/ascii.h"
@@ -114,7 +115,7 @@ Array nvim_get_autocmds(Dict(get_autocmds) *opts, Error *err)
     break;
   case kObjectTypeInteger:
     group = (int)opts->group.data.integer;
-    char *name = augroup_name(group);
+    char *name = group == 0 ? NULL : augroup_name(group);
     VALIDATE_INT(augroup_exists(name), "group", opts->group.data.integer, {
       goto cleanup;
     });
@@ -125,7 +126,7 @@ Array nvim_get_autocmds(Dict(get_autocmds) *opts, Error *err)
     });
   }
 
-  if (HAS_KEY(opts->event)) {
+  if (HAS_KEY(opts, get_autocmds, event)) {
     check_event = true;
 
     Object v = opts->event;
@@ -148,13 +149,13 @@ Array nvim_get_autocmds(Dict(get_autocmds) *opts, Error *err)
     }
   }
 
-  VALIDATE((!HAS_KEY(opts->pattern) || !HAS_KEY(opts->buffer)),
+  VALIDATE((!HAS_KEY(opts, get_autocmds, pattern) || !HAS_KEY(opts, get_autocmds, buffer)),
            "%s", "Cannot use both 'pattern' and 'buffer'", {
     goto cleanup;
   });
 
   int pattern_filter_count = 0;
-  if (HAS_KEY(opts->pattern)) {
+  if (HAS_KEY(opts, get_autocmds, pattern)) {
     Object v = opts->pattern;
     if (v.type == kObjectTypeString) {
       pattern_filters[pattern_filter_count] = v.data.string.data;
@@ -209,7 +210,7 @@ Array nvim_get_autocmds(Dict(get_autocmds) *opts, Error *err)
       snprintf(pattern_buflocal, BUFLOCAL_PAT_LEN, "<buffer=%d>", (int)buf->handle);
       ADD(buffers, CSTR_TO_OBJ(pattern_buflocal));
     });
-  } else if (HAS_KEY(opts->buffer)) {
+  } else if (HAS_KEY(opts, get_autocmds, buffer)) {
     VALIDATE_EXP(false, "buffer", "Integer or Array", api_typename(opts->buffer.type), {
       goto cleanup;
     });
@@ -225,8 +226,12 @@ Array nvim_get_autocmds(Dict(get_autocmds) *opts, Error *err)
       continue;
     }
 
-    for (AutoPat *ap = au_get_autopat_for_event(event); ap != NULL; ap = ap->next) {
-      if (ap->cmds == NULL) {
+    AutoCmdVec *acs = au_get_autocmds_for_event(event);
+    for (size_t i = 0; i < kv_size(*acs); i++) {
+      AutoCmd *const ac = &kv_A(*acs, i);
+      AutoPat *const ap = ac->pat;
+
+      if (ap == NULL) {
         continue;
       }
 
@@ -238,19 +243,16 @@ Array nvim_get_autocmds(Dict(get_autocmds) *opts, Error *err)
       // Skip 'pattern' from invalid patterns if passed.
       if (pattern_filter_count > 0) {
         bool passed = false;
-        for (int i = 0; i < pattern_filter_count; i++) {
-          assert(i < AUCMD_MAX_PATTERNS);
-          assert(pattern_filters[i]);
+        for (int j = 0; j < pattern_filter_count; j++) {
+          assert(j < AUCMD_MAX_PATTERNS);
+          assert(pattern_filters[j]);
 
-          char *pat = pattern_filters[i];
+          char *pat = pattern_filters[j];
           int patlen = (int)strlen(pat);
 
           if (aupat_is_buflocal(pat, patlen)) {
-            aupat_normalize_buflocal_pat(pattern_buflocal,
-                                         pat,
-                                         patlen,
+            aupat_normalize_buflocal_pat(pattern_buflocal, pat, patlen,
                                          aupat_get_buflocal_nr(pat, patlen));
-
             pat = pattern_buflocal;
           }
 
@@ -265,85 +267,71 @@ Array nvim_get_autocmds(Dict(get_autocmds) *opts, Error *err)
         }
       }
 
-      for (AutoCmd *ac = ap->cmds; ac != NULL; ac = ac->next) {
-        if (aucmd_exec_is_deleted(ac->exec)) {
-          continue;
-        }
+      Dictionary autocmd_info = ARRAY_DICT_INIT;
 
-        Dictionary autocmd_info = ARRAY_DICT_INIT;
-
-        if (ap->group != AUGROUP_DEFAULT) {
-          PUT(autocmd_info, "group", INTEGER_OBJ(ap->group));
-          PUT(autocmd_info, "group_name", CSTR_TO_OBJ(augroup_name(ap->group)));
-        }
-
-        if (ac->id > 0) {
-          PUT(autocmd_info, "id", INTEGER_OBJ(ac->id));
-        }
-
-        if (ac->desc != NULL) {
-          PUT(autocmd_info, "desc", CSTR_TO_OBJ(ac->desc));
-        }
-
-        if (ac->exec.type == CALLABLE_CB) {
-          PUT(autocmd_info, "command", STRING_OBJ(STRING_INIT));
-
-          Callback *cb = &ac->exec.callable.cb;
-          switch (cb->type) {
-          case kCallbackLua:
-            if (nlua_ref_is_function(cb->data.luaref)) {
-              PUT(autocmd_info, "callback", LUAREF_OBJ(api_new_luaref(cb->data.luaref)));
-            }
-            break;
-          case kCallbackFuncref:
-          case kCallbackPartial:
-            PUT(autocmd_info, "callback", STRING_OBJ(cstr_as_string(callback_to_string(cb))));
-            break;
-          default:
-            abort();
-          }
-        } else {
-          PUT(autocmd_info,
-              "command",
-              STRING_OBJ(cstr_as_string(xstrdup(ac->exec.callable.cmd))));
-        }
-
-        PUT(autocmd_info,
-            "pattern",
-            STRING_OBJ(cstr_to_string(ap->pat)));
-
-        PUT(autocmd_info,
-            "event",
-            STRING_OBJ(cstr_to_string((char *)event_nr2name(event))));
-
-        PUT(autocmd_info, "once", BOOLEAN_OBJ(ac->once));
-
-        if (ap->buflocal_nr) {
-          PUT(autocmd_info, "buflocal", BOOLEAN_OBJ(true));
-          PUT(autocmd_info, "buffer", INTEGER_OBJ(ap->buflocal_nr));
-        } else {
-          PUT(autocmd_info, "buflocal", BOOLEAN_OBJ(false));
-        }
-
-        // TODO(sctx): It would be good to unify script_ctx to actually work with lua
-        //  right now it's just super weird, and never really gives you the info that
-        //  you would expect from this.
-        //
-        //  I think we should be able to get the line number, filename, etc. from lua
-        //  when we're executing something, and it should be easy to then save that
-        //  info here.
-        //
-        //  I think it's a big loss not getting line numbers of where options, autocmds,
-        //  etc. are set (just getting "Sourced (lua)" or something is not that helpful.
-        //
-        //  Once we do that, we can put these into the autocmd_info, but I don't think it's
-        //  useful to do that at this time.
-        //
-        // PUT(autocmd_info, "sid", INTEGER_OBJ(ac->script_ctx.sc_sid));
-        // PUT(autocmd_info, "lnum", INTEGER_OBJ(ac->script_ctx.sc_lnum));
-
-        ADD(autocmd_list, DICTIONARY_OBJ(autocmd_info));
+      if (ap->group != AUGROUP_DEFAULT) {
+        PUT(autocmd_info, "group", INTEGER_OBJ(ap->group));
+        PUT(autocmd_info, "group_name", CSTR_TO_OBJ(augroup_name(ap->group)));
       }
+
+      if (ac->id > 0) {
+        PUT(autocmd_info, "id", INTEGER_OBJ(ac->id));
+      }
+
+      if (ac->desc != NULL) {
+        PUT(autocmd_info, "desc", CSTR_TO_OBJ(ac->desc));
+      }
+
+      if (ac->exec.type == CALLABLE_CB) {
+        PUT(autocmd_info, "command", STRING_OBJ(STRING_INIT));
+
+        Callback *cb = &ac->exec.callable.cb;
+        switch (cb->type) {
+        case kCallbackLua:
+          if (nlua_ref_is_function(cb->data.luaref)) {
+            PUT(autocmd_info, "callback", LUAREF_OBJ(api_new_luaref(cb->data.luaref)));
+          }
+          break;
+        case kCallbackFuncref:
+        case kCallbackPartial:
+          PUT(autocmd_info, "callback", CSTR_AS_OBJ(callback_to_string(cb)));
+          break;
+        default:
+          abort();
+        }
+      } else {
+        PUT(autocmd_info, "command", CSTR_TO_OBJ(ac->exec.callable.cmd));
+      }
+
+      PUT(autocmd_info, "pattern", CSTR_TO_OBJ(ap->pat));
+      PUT(autocmd_info, "event", CSTR_TO_OBJ(event_nr2name(event)));
+      PUT(autocmd_info, "once", BOOLEAN_OBJ(ac->once));
+
+      if (ap->buflocal_nr) {
+        PUT(autocmd_info, "buflocal", BOOLEAN_OBJ(true));
+        PUT(autocmd_info, "buffer", INTEGER_OBJ(ap->buflocal_nr));
+      } else {
+        PUT(autocmd_info, "buflocal", BOOLEAN_OBJ(false));
+      }
+
+      // TODO(sctx): It would be good to unify script_ctx to actually work with lua
+      //  right now it's just super weird, and never really gives you the info that
+      //  you would expect from this.
+      //
+      //  I think we should be able to get the line number, filename, etc. from lua
+      //  when we're executing something, and it should be easy to then save that
+      //  info here.
+      //
+      //  I think it's a big loss not getting line numbers of where options, autocmds,
+      //  etc. are set (just getting "Sourced (lua)" or something is not that helpful.
+      //
+      //  Once we do that, we can put these into the autocmd_info, but I don't think it's
+      //  useful to do that at this time.
+      //
+      // PUT(autocmd_info, "sid", INTEGER_OBJ(ac->script_ctx.sc_sid));
+      // PUT(autocmd_info, "lnum", INTEGER_OBJ(ac->script_ctx.sc_lnum));
+
+      ADD(autocmd_list, DICTIONARY_OBJ(autocmd_info));
     }
   }
 
@@ -360,7 +348,7 @@ cleanup:
 ///     vim.api.nvim_create_autocmd({"BufEnter", "BufWinEnter"}, {
 ///       pattern = {"*.c", "*.h"},
 ///       callback = function(ev)
-///         print(string.format('event fired: %s', vim.inspect(ev)))
+///         print(string.format('event fired: \%s', vim.inspect(ev)))
 ///       end
 ///     })
 /// </pre>
@@ -421,12 +409,12 @@ Integer nvim_create_autocmd(uint64_t channel_id, Object event, Dict(create_autoc
     goto cleanup;
   }
 
-  VALIDATE((!HAS_KEY(opts->callback) || !HAS_KEY(opts->command)),
+  VALIDATE((!HAS_KEY(opts, create_autocmd, callback) || !HAS_KEY(opts, create_autocmd, command)),
            "%s", "Cannot use both 'callback' and 'command'", {
     goto cleanup;
   });
 
-  if (HAS_KEY(opts->callback)) {
+  if (HAS_KEY(opts, create_autocmd, callback)) {
     // NOTE: We could accept callable tables, but that isn't common in the API.
 
     Object *callback = &opts->callback;
@@ -455,40 +443,37 @@ Integer nvim_create_autocmd(uint64_t channel_id, Object event, Dict(create_autoc
 
     aucmd.type = CALLABLE_CB;
     aucmd.callable.cb = cb;
-  } else if (HAS_KEY(opts->command)) {
-    Object *command = &opts->command;
-    VALIDATE_T("command", kObjectTypeString, command->type, {
-      goto cleanup;
-    });
+  } else if (HAS_KEY(opts, create_autocmd, command)) {
     aucmd.type = CALLABLE_EX;
-    aucmd.callable.cmd = string_to_cstr(command->data.string);
+    aucmd.callable.cmd = string_to_cstr(opts->command);
   } else {
     VALIDATE(false, "%s", "Required: 'command' or 'callback'", {
       goto cleanup;
     });
   }
 
-  bool is_once = api_object_to_bool(opts->once, "once", false, err);
-  bool is_nested = api_object_to_bool(opts->nested, "nested", false, err);
-
   int au_group = get_augroup_from_object(opts->group, err);
   if (au_group == AUGROUP_ERROR) {
     goto cleanup;
   }
 
-  if (!get_patterns_from_pattern_or_buf(&patterns, opts->pattern, opts->buffer, err)) {
+  bool has_buffer = HAS_KEY(opts, create_autocmd, buffer);
+
+  VALIDATE((!HAS_KEY(opts, create_autocmd, pattern) || !has_buffer),
+           "%s", "Cannot use both 'pattern' and 'buffer' for the same autocmd", {
+    goto cleanup;
+  });
+
+  if (!get_patterns_from_pattern_or_buf(&patterns, opts->pattern, has_buffer, opts->buffer, err)) {
     goto cleanup;
   }
 
-  if (HAS_KEY(opts->desc)) {
-    VALIDATE_T("desc", kObjectTypeString, opts->desc.type, {
-      goto cleanup;
-    });
-    desc = opts->desc.data.string.data;
+  if (HAS_KEY(opts, create_autocmd, desc)) {
+    desc = opts->desc.data;
   }
 
   if (patterns.size == 0) {
-    ADD(patterns, STRING_OBJ(STATIC_CSTR_TO_STRING("*")));
+    ADD(patterns, STATIC_CSTR_TO_OBJ("*"));
   }
 
   VALIDATE_R((event_array.size > 0), "event", {
@@ -509,8 +494,8 @@ Integer nvim_create_autocmd(uint64_t channel_id, Object event, Dict(create_autoc
                                   pat.data.string.data,
                                   (int)pat.data.string.size,
                                   au_group,
-                                  is_once,
-                                  is_nested,
+                                  opts->once,
+                                  opts->nested,
                                   desc,
                                   aucmd);
       });
@@ -530,11 +515,9 @@ cleanup:
   return autocmd_id;
 }
 
-/// Delete an autocommand by id.
+/// Deletes an autocommand by id.
 ///
-/// NOTE: Only autocommands created via the API have an id.
-/// @param id Integer The id returned by nvim_create_autocmd
-/// @see |nvim_create_autocmd()|
+/// @param id Integer Autocommand id returned by |nvim_create_autocmd()|
 void nvim_del_autocmd(Integer id, Error *err)
   FUNC_API_SINCE(9)
 {
@@ -546,8 +529,8 @@ void nvim_del_autocmd(Integer id, Error *err)
   }
 }
 
-/// Clear all autocommands that match the corresponding {opts}. To delete
-/// a particular autocmd, see |nvim_del_autocmd()|.
+/// Clears all autocommands selected by {opts}. To delete autocmds see |nvim_del_autocmd()|.
+///
 /// @param opts Parameters
 ///         - event: (string|table)
 ///              Examples:
@@ -583,7 +566,9 @@ void nvim_clear_autocmds(Dict(clear_autocmds) *opts, Error *err)
     goto cleanup;
   }
 
-  VALIDATE((!HAS_KEY(opts->pattern) || !HAS_KEY(opts->buffer)),
+  bool has_buffer = HAS_KEY(opts, clear_autocmds, buffer);
+
+  VALIDATE((!HAS_KEY(opts, clear_autocmds, pattern) || !has_buffer),
            "%s", "Cannot use both 'pattern' and 'buffer'", {
     goto cleanup;
   });
@@ -593,14 +578,14 @@ void nvim_clear_autocmds(Dict(clear_autocmds) *opts, Error *err)
     goto cleanup;
   }
 
-  if (!get_patterns_from_pattern_or_buf(&patterns, opts->pattern, opts->buffer, err)) {
+  if (!get_patterns_from_pattern_or_buf(&patterns, opts->pattern, has_buffer, opts->buffer, err)) {
     goto cleanup;
   }
 
   // When we create the autocmds, we want to say that they are all matched, so that's *
   // but when we clear them, we want to say that we didn't pass a pattern, so that's NUL
   if (patterns.size == 0) {
-    ADD(patterns, STRING_OBJ(STATIC_CSTR_TO_STRING("")));
+    ADD(patterns, STATIC_CSTR_TO_OBJ(""));
   }
 
   // If we didn't pass any events, that means clear all events.
@@ -608,7 +593,7 @@ void nvim_clear_autocmds(Dict(clear_autocmds) *opts, Error *err)
     FOR_ALL_AUEVENTS(event) {
       FOREACH_ITEM(patterns, pat_object, {
         char *pat = pat_object.data.string.data;
-        if (!clear_autocmd(event, (char *)pat, au_group, err)) {
+        if (!clear_autocmd(event, pat, au_group, err)) {
           goto cleanup;
         }
       });
@@ -619,7 +604,7 @@ void nvim_clear_autocmds(Dict(clear_autocmds) *opts, Error *err)
 
       FOREACH_ITEM(patterns, pat_object, {
         char *pat = pat_object.data.string.data;
-        if (!clear_autocmd(event_nr, (char *)pat, au_group, err)) {
+        if (!clear_autocmd(event_nr, pat, au_group, err)) {
           goto cleanup;
         }
       });
@@ -663,7 +648,7 @@ Integer nvim_create_augroup(uint64_t channel_id, String name, Dict(create_augrou
 
     if (clear_autocmds) {
       FOR_ALL_AUEVENTS(event) {
-        aupat_del_for_event_and_group(event, augroup);
+        aucmd_del_for_event_and_group(event, augroup);
       }
     }
   });
@@ -684,7 +669,7 @@ void nvim_del_augroup_by_id(Integer id, Error *err)
   FUNC_API_SINCE(9)
 {
   TRY_WRAP(err, {
-    char *name = augroup_name((int)id);
+    char *name = id == 0 ? NULL : augroup_name((int)id);
     augroup_del(name, false);
   });
 }
@@ -746,7 +731,7 @@ void nvim_exec_autocmds(Object event, Dict(exec_autocmds) *opts, Error *err)
     break;
   case kObjectTypeInteger:
     au_group = (int)opts->group.data.integer;
-    char *name = augroup_name(au_group);
+    char *name = au_group == 0 ? NULL : augroup_name(au_group);
     VALIDATE_INT(augroup_exists(name), "group", (int64_t)au_group, {
       goto cleanup;
     });
@@ -757,42 +742,42 @@ void nvim_exec_autocmds(Object event, Dict(exec_autocmds) *opts, Error *err)
     });
   }
 
-  if (HAS_KEY(opts->buffer)) {
-    Object buf_obj = opts->buffer;
-    VALIDATE_EXP((buf_obj.type == kObjectTypeInteger || buf_obj.type == kObjectTypeBuffer),
-                 "buffer", "Integer", api_typename(buf_obj.type), {
+  bool has_buffer = false;
+  if (HAS_KEY(opts, exec_autocmds, buffer)) {
+    VALIDATE((!HAS_KEY(opts, exec_autocmds, pattern)),
+             "%s", "Cannot use both 'pattern' and 'buffer' for the same autocmd", {
       goto cleanup;
     });
 
-    buf = find_buffer_by_handle((Buffer)buf_obj.data.integer, err);
+    has_buffer = true;
+    buf = find_buffer_by_handle(opts->buffer, err);
 
     if (ERROR_SET(err)) {
       goto cleanup;
     }
   }
 
-  if (!get_patterns_from_pattern_or_buf(&patterns, opts->pattern, opts->buffer, err)) {
+  if (!get_patterns_from_pattern_or_buf(&patterns, opts->pattern, has_buffer, opts->buffer, err)) {
     goto cleanup;
   }
 
   if (patterns.size == 0) {
-    ADD(patterns, STRING_OBJ(STATIC_CSTR_TO_STRING("")));
+    ADD(patterns, STATIC_CSTR_TO_OBJ(""));
   }
 
-  if (HAS_KEY(opts->data)) {
+  if (HAS_KEY(opts, exec_autocmds, data)) {
     data = &opts->data;
   }
 
-  modeline = api_object_to_bool(opts->modeline, "modeline", true, err);
+  modeline = GET_BOOL_OR_TRUE(opts, exec_autocmds, modeline);
 
   bool did_aucmd = false;
   FOREACH_ITEM(event_array, event_str, {
     GET_ONE_EVENT(event_nr, event_str, cleanup)
 
     FOREACH_ITEM(patterns, pat, {
-      char *fname = !HAS_KEY(opts->buffer) ? pat.data.string.data : NULL;
-      did_aucmd |=
-        apply_autocmds_group(event_nr, fname, NULL, true, au_group, buf, NULL, data);
+      char *fname = !has_buffer ? pat.data.string.data : NULL;
+      did_aucmd |= apply_autocmds_group(event_nr, fname, NULL, true, au_group, buf, NULL, data);
     })
   })
 
@@ -840,7 +825,7 @@ static int get_augroup_from_object(Object group, Error *err)
     return au_group;
   case kObjectTypeInteger:
     au_group = (int)group.data.integer;
-    char *name = augroup_name(au_group);
+    char *name = au_group == 0 ? NULL : augroup_name(au_group);
     VALIDATE_INT(augroup_exists(name), "group", (int64_t)au_group, {
       return AUGROUP_ERROR;
     });
@@ -852,21 +837,16 @@ static int get_augroup_from_object(Object group, Error *err)
   }
 }
 
-static bool get_patterns_from_pattern_or_buf(Array *patterns, Object pattern, Object buffer,
-                                             Error *err)
+static bool get_patterns_from_pattern_or_buf(Array *patterns, Object pattern, bool has_buffer,
+                                             Buffer buffer, Error *err)
 {
   const char pattern_buflocal[BUFLOCAL_PAT_LEN];
 
-  VALIDATE((!HAS_KEY(pattern) || !HAS_KEY(buffer)),
-           "%s", "Cannot use both 'pattern' and 'buffer' for the same autocmd", {
-    return false;
-  });
-
-  if (HAS_KEY(pattern)) {
+  if (pattern.type != kObjectTypeNil) {
     Object *v = &pattern;
 
     if (v->type == kObjectTypeString) {
-      char *pat = v->data.string.data;
+      const char *pat = v->data.string.data;
       size_t patlen = aucmd_pattern_length(pat);
       while (patlen) {
         ADD(*patterns, STRING_OBJ(cbuf_to_string(pat, patlen)));
@@ -881,7 +861,7 @@ static bool get_patterns_from_pattern_or_buf(Array *patterns, Object pattern, Ob
 
       Array array = v->data.array;
       FOREACH_ITEM(array, entry, {
-        char *pat = entry.data.string.data;
+        const char *pat = entry.data.string.data;
         size_t patlen = aucmd_pattern_length(pat);
         while (patlen) {
           ADD(*patterns, STRING_OBJ(cbuf_to_string(pat, patlen)));
@@ -895,19 +875,14 @@ static bool get_patterns_from_pattern_or_buf(Array *patterns, Object pattern, Ob
         return false;
       });
     }
-  } else if (HAS_KEY(buffer)) {
-    VALIDATE_EXP((buffer.type == kObjectTypeInteger || buffer.type == kObjectTypeBuffer),
-                 "buffer", "Integer", api_typename(buffer.type), {
-      return false;
-    });
-
-    buf_T *buf = find_buffer_by_handle((Buffer)buffer.data.integer, err);
+  } else if (has_buffer) {
+    buf_T *buf = find_buffer_by_handle(buffer, err);
     if (ERROR_SET(err)) {
       return false;
     }
 
     snprintf((char *)pattern_buflocal, BUFLOCAL_PAT_LEN, "<buffer=%d>", (int)buf->handle);
-    ADD(*patterns, STRING_OBJ(cstr_to_string(pattern_buflocal)));
+    ADD(*patterns, CSTR_TO_OBJ(pattern_buflocal));
   }
 
   return true;

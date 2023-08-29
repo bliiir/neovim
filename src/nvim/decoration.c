@@ -65,7 +65,7 @@ void bufhl_add_hl_pos_offset(buf_T *buf, int src_id, int hl_id, lpos_T pos_start
     }
     extmark_set(buf, (uint32_t)src_id, NULL,
                 (int)lnum - 1, hl_start, (int)lnum - 1 + end_off, hl_end,
-                &decor, true, false, kExtmarkNoUndo);
+                &decor, true, false, kExtmarkNoUndo, NULL);
   }
 }
 
@@ -81,12 +81,15 @@ void decor_redraw(buf_T *buf, int row1, int row2, Decoration *decor)
     }
   }
 
-  if (decor && decor_virt_pos(*decor)) {
+  if (decor && decor_virt_pos(decor)) {
     redraw_buf_line_later(buf, row1 + 1, false);
+    if (decor->virt_text_pos == kVTInline) {
+      changed_line_display_buf(buf);
+    }
   }
 
   if (decor && kv_size(decor->virt_lines)) {
-    redraw_buf_line_later(buf, row1 + 1 + (decor->virt_lines_above?0:1), true);
+    redraw_buf_line_later(buf, row1 + 1 + (decor->virt_lines_above ? 0 : 1), true);
     changed_line_display_buf(buf);
   }
 }
@@ -95,6 +98,10 @@ void decor_remove(buf_T *buf, int row, int row2, Decoration *decor)
 {
   decor_redraw(buf, row, row2, decor);
   if (decor) {
+    if (kv_size(decor->virt_text) && decor->virt_text_pos == kVTInline) {
+      assert(buf->b_virt_text_inline > 0);
+      buf->b_virt_text_inline--;
+    }
     if (kv_size(decor->virt_lines)) {
       assert(buf->b_virt_line_blocks > 0);
       buf->b_virt_line_blocks--;
@@ -195,9 +202,9 @@ Decoration get_decor(mtkey_t mark)
 }
 
 /// @return true if decor has a virtual position (virtual text or ui_watched)
-static bool decor_virt_pos(Decoration decor)
+bool decor_virt_pos(const Decoration *const decor)
 {
-  return kv_size(decor.virt_text) || decor.ui_watched;
+  return kv_size(decor->virt_text) || decor->ui_watched;
 }
 
 bool decor_redraw_start(win_T *wp, int top_row, DecorState *state)
@@ -225,7 +232,7 @@ bool decor_redraw_start(win_T *wp, int top_row, DecorState *state)
 
     // Exclude start marks if the end mark position is above the top row
     // Exclude end marks if we have already added the start mark
-    if ((mt_start(mark) && altpos.row < top_row && !decor_virt_pos(decor))
+    if ((mt_start(mark) && altpos.row < top_row && !decor_virt_pos(&decor))
         || (mt_end(mark) && altpos.row >= top_row)) {
       goto next_mark;
     }
@@ -325,7 +332,7 @@ next_mark:
 
   int attr = 0;
   size_t j = 0;
-  bool conceal = 0;
+  int conceal = 0;
   int conceal_char = 0;
   int conceal_attr = 0;
   TriState spell = kNone;
@@ -335,7 +342,7 @@ next_mark:
     bool active = false, keep = true;
     if (item.end_row < state->row
         || (item.end_row == state->row && item.end_col <= col)) {
-      if (!(item.start_row >= state->row && decor_virt_pos(item.decor))) {
+      if (!(item.start_row >= state->row && decor_virt_pos(&item.decor))) {
         keep = false;
       }
     } else {
@@ -355,8 +362,9 @@ next_mark:
       attr = hl_combine_attr(attr, item.attr_id);
     }
     if (active && item.decor.conceal) {
-      conceal = true;
-      if (item.start_row == state->row && item.start_col == col && item.decor.conceal_char) {
+      conceal = 1;
+      if (item.start_row == state->row && item.start_col == col) {
+        conceal = 2;
         conceal_char = item.decor.conceal_char;
         state->col_until = MIN(state->col_until, item.start_col);
         conceal_attr = item.attr_id;
@@ -365,10 +373,19 @@ next_mark:
     if (active && item.decor.spell != kNone) {
       spell = item.decor.spell;
     }
-    if ((item.start_row == state->row && item.start_col <= col)
-        && decor_virt_pos(item.decor)
-        && item.decor.virt_text_pos == kVTOverlay && item.win_col == -1) {
-      item.win_col = (item.decor.virt_text_hide && hidden) ? -2 : win_col;
+    if (item.start_row == state->row && decor_virt_pos(&item.decor)
+        && item.draw_col != INT_MIN) {
+      if (item.start_col <= col) {
+        if (item.decor.virt_text_pos == kVTOverlay && item.draw_col == -1) {
+          item.draw_col = (item.decor.virt_text_hide && hidden) ? INT_MIN : win_col;
+        } else if (item.draw_col == -3) {
+          item.draw_col = -1;
+        }
+      } else if (wp->w_p_wrap
+                 && (item.decor.virt_text_pos == kVTRightAlign
+                     || item.decor.virt_text_pos == kVTWinCol)) {
+        item.draw_col = -3;
+      }
     }
     if (keep) {
       kv_A(state->active, j++) = item;
@@ -417,7 +434,9 @@ void decor_redraw_signs(buf_T *buf, int row, int *num_signs, SignTextAttrs sattr
         if (sattrs[j - 1].priority >= decor->priority) {
           break;
         }
-        sattrs[j] = sattrs[j - 1];
+        if (j < SIGN_SHOW_MAX) {
+          sattrs[j] = sattrs[j - 1];
+        }
       }
       if (j < SIGN_SHOW_MAX) {
         sattrs[j] = (SignTextAttrs) {
@@ -543,7 +562,7 @@ bool decor_redraw_eol(win_T *wp, DecorState *state, int *eol_attr, int eol_col)
   bool has_virttext = false;
   for (size_t i = 0; i < kv_size(state->active); i++) {
     DecorRange item = kv_A(state->active, i);
-    if (item.start_row == state->row && decor_virt_pos(item.decor)) {
+    if (item.start_row == state->row && decor_virt_pos(&item.decor)) {
       has_virttext = true;
     }
 
@@ -574,26 +593,34 @@ int decor_virt_lines(win_T *wp, linenr_T lnum, VirtLines *lines, TriState has_fo
     return 0;
   }
 
-  int virt_lines = 0;
-  int row = MAX(lnum - 2, 0);
-  int end_row = (int)lnum;
-  MarkTreeIter itr[1] = { 0 };
-  marktree_itr_get(buf->b_marktree, row, 0,  itr);
+  assert(lnum > 0);
   bool below_fold = lnum > 1 && hasFoldingWin(wp, lnum - 1, NULL, NULL, true, NULL);
   if (has_fold == kNone) {
     has_fold = hasFoldingWin(wp, lnum, NULL, NULL, true, NULL);
   }
+
+  const int row = lnum - 1;
+  const int start_row = below_fold ? row : MAX(row - 1, 0);
+  const int end_row = has_fold ? row : row + 1;
+  if (start_row >= end_row) {
+    return 0;
+  }
+
+  int virt_lines = 0;
+  MarkTreeIter itr[1] = { 0 };
+  marktree_itr_get(buf->b_marktree, start_row, 0, itr);
   while (true) {
     mtkey_t mark = marktree_itr_current(itr);
     if (mark.pos.row < 0 || mark.pos.row >= end_row) {
       break;
-    } else if (marktree_decor_level(mark) < kDecorLevelVirtLine) {
+    } else if (mt_end(mark)
+               || marktree_decor_level(mark) < kDecorLevelVirtLine
+               || !mark.decor_full) {
       goto next_mark;
     }
-    bool above = mark.pos.row > (lnum - 2);
-    bool has_fold_cur = above ? has_fold : below_fold;
-    Decoration *decor = mark.decor_full;
-    if (!has_fold_cur && decor && decor->virt_lines_above == above) {
+    Decoration *const decor = mark.decor_full;
+    const int draw_row = mark.pos.row + (decor->virt_lines_above ? 0 : 1);
+    if (draw_row == row) {
       virt_lines += (int)kv_size(decor->virt_lines);
       if (lines) {
         kv_splice(*lines, decor->virt_lines);

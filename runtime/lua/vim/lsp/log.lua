@@ -2,14 +2,12 @@
 
 local log = {}
 
--- FIXME: DOC
--- Should be exposed in the vim docs.
---
--- Log level dictionary with reverse lookup as well.
---
--- Can be used to lookup the number from the name or the name from the number.
--- Levels by name: "TRACE", "DEBUG", "INFO", "WARN", "ERROR", "OFF"
--- Level numbers begin with "TRACE" at 0
+--- Log level dictionary with reverse lookup as well.
+---
+--- Can be used to lookup the number from the name or the name from the number.
+--- Levels by name: "TRACE", "DEBUG", "INFO", "WARN", "ERROR", "OFF"
+--- Level numbers begin with "TRACE" at 0
+--- @nodoc
 log.levels = vim.deepcopy(vim.log.levels)
 
 -- Default log level is warn.
@@ -20,7 +18,6 @@ local format_func = function(arg)
 end
 
 do
-  ---@private
   local function notify(msg, level)
     if vim.in_fast_event() then
       vim.schedule(function()
@@ -31,8 +28,7 @@ do
     end
   end
 
-  local path_sep = vim.loop.os_uname().version:match('Windows') and '\\' or '/'
-  ---@private
+  local path_sep = vim.uv.os_uname().version:match('Windows') and '\\' or '/'
   local function path_join(...)
     return table.concat(vim.tbl_flatten({ ... }), path_sep)
   end
@@ -44,13 +40,12 @@ do
   vim.fn.mkdir(vim.fn.stdpath('log'), 'p')
 
   --- Returns the log filename.
-  ---@returns (string) log filename
+  ---@return string log filename
   function log.get_filename()
     return logfilename
   end
 
   local logfile, openerr
-  ---@private
   --- Opens log file. Returns true if file is open, false on error
   local function open_logfile()
     -- Try to open file only once
@@ -68,7 +63,7 @@ do
       return false
     end
 
-    local log_info = vim.loop.fs_stat(logfilename)
+    local log_info = vim.uv.fs_stat(logfilename)
     if log_info and log_info.size > 1e9 then
       local warn_msg = string.format(
         'LSP client log is large (%d MB): %s',
@@ -154,7 +149,7 @@ function log.set_level(level)
 end
 
 --- Gets the current log level.
----@return string current log level
+---@return integer current log level
 function log.get_level()
   return current_log_level
 end
@@ -174,4 +169,3 @@ function log.should_log(level)
 end
 
 return log
--- vim:sw=2 ts=2 et

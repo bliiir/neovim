@@ -155,9 +155,9 @@ describe('API: highlight',function()
 
   it("nvim_buf_add_highlight to other buffer doesn't crash if undo is disabled #12873", function()
     command('vsplit file')
-    local err, _ = pcall(meths.buf_set_option, 1, 'undofile', false)
+    local err, _ = pcall(meths.set_option_value, 'undofile', false, { buf = 1 })
     eq(true, err)
-    err, _ = pcall(meths.buf_set_option, 1, 'undolevels', -1)
+    err, _ = pcall(meths.set_option_value, 'undolevels', -1, { buf = 1 })
     eq(true, err)
     err, _ = pcall(meths.buf_add_highlight, 1, -1, 'Question', 0, 0, -1)
     eq(true, err)
@@ -434,10 +434,8 @@ describe('API: get highlight', function()
   before_each(clear)
 
   it('validation', function()
-    eq(
-      'Invalid highlight name: expected String, got Integer',
-      pcall_err(meths.get_hl, 0, { name = 177 })
-    )
+    eq("Invalid 'name': expected String, got Integer",
+       pcall_err(meths.get_hl, 0, { name = 177 }))
     eq('Highlight id out of bounds', pcall_err(meths.get_hl, 0, { name = 'Test set hl' }))
   end)
 
@@ -534,7 +532,7 @@ describe('API: get highlight', function()
     eq('Highlight id out of bounds', pcall_err(meths.get_hl, 0, { id = 0 }))
 
     eq(
-      'Invalid highlight id: expected Integer, got String',
+      "Invalid 'id': expected Integer, got String",
       pcall_err(meths.get_hl, 0, { id = 'Test_set_hl' })
     )
 
@@ -574,5 +572,31 @@ describe('API: get highlight', function()
     local hl = { link = 'Bar', fg = tonumber('00ff00', 16), bold = true, cterm = { bold = true } }
     meths.set_hl(0, 'Foo', hl)
     eq(hl, meths.get_hl(0, { name = 'Foo', link = true }))
+  end)
+
+  it("doesn't contain unset groups", function()
+    local id = meths.get_hl_id_by_name "@foobar.hubbabubba"
+    ok(id > 0)
+
+    local data = meths.get_hl(0, {})
+    eq(nil, data["@foobar.hubbabubba"])
+    eq(nil, data["@foobar"])
+
+    command 'hi @foobar.hubbabubba gui=bold'
+    data = meths.get_hl(0, {})
+    eq({bold = true}, data["@foobar.hubbabubba"])
+    eq(nil, data["@foobar"])
+
+    -- @foobar.hubbabubba was explicitly cleared and thus shows up
+    -- but @foobar was never touched, and thus doesn't
+    command 'hi clear @foobar.hubbabubba'
+    data = meths.get_hl(0, {})
+    eq({}, data["@foobar.hubbabubba"])
+    eq(nil, data["@foobar"])
+  end)
+
+  it('should return default flag', function()
+    meths.set_hl(0, 'Tried', { fg = "#00ff00", default = true })
+    eq({ fg = tonumber('00ff00', 16), default = true }, meths.get_hl(0, { name = 'Tried' }))
   end)
 end)

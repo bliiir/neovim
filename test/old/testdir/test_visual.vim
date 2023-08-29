@@ -485,14 +485,16 @@ endfunc
 
 func Test_visual_block_put_invalid()
   enew!
-  behave mswin
+  " behave mswin
+  set selection=exclusive
   norm yy
   norm v)Ps/^/	
   " this was causing the column to become negative
   silent norm ggv)P
 
   bwipe!
-  behave xterm
+  " behave xterm
+  set selection&
 endfunc
 
 " Visual modes (v V CTRL-V) followed by an operator; count; repeating
@@ -933,7 +935,7 @@ func Test_visual_block_mode()
 endfunc
 
 func Test_visual_force_motion_feedkeys()
-    onoremap <expr> i- execute('let g:mode = mode(1)')
+    onoremap <expr> i- execute('let g:mode = mode(1)')->slice(0, 0)
     call feedkeys('dvi-', 'x')
     call assert_equal('nov', g:mode)
     call feedkeys('di-', 'x')
@@ -1556,5 +1558,23 @@ func Test_heap_buffer_overflow()
   set updatecount&
 endfunc
 
+" Test Visual highlight with cursor at end of screen line and 'showbreak'
+func Test_visual_hl_with_showbreak()
+  CheckScreendump
+
+  let lines =<< trim END
+    setlocal showbreak=+
+    call setline(1, repeat('a', &columns + 10))
+    normal g$v4lo
+  END
+  call writefile(lines, 'XTest_visual_sbr', 'D')
+
+  let buf = RunVimInTerminal('-S XTest_visual_sbr', {'rows': 6, 'cols': 50})
+  call VerifyScreenDump(buf, 'Test_visual_hl_with_showbreak', {})
+
+  " clean up
+  call term_sendkeys(buf, "\<Esc>")
+  call StopVimInTerminal(buf)
+endfunc
 
 " vim: shiftwidth=2 sts=2 expandtab

@@ -56,7 +56,6 @@ function vim.inspect_pos(bufnr, row, col, filter)
   }
 
   -- resolve hl links
-  ---@private
   local function resolve_hl(data)
     if data.hl_group then
       local hlid = vim.api.nvim_get_hl_id_by_name(data.hl_group)
@@ -70,15 +69,18 @@ function vim.inspect_pos(bufnr, row, col, filter)
   if filter.treesitter then
     for _, capture in pairs(vim.treesitter.get_captures_at_pos(bufnr, row, col)) do
       capture.hl_group = '@' .. capture.capture .. '.' .. capture.lang
-      table.insert(results.treesitter, resolve_hl(capture))
+      results.treesitter[#results.treesitter + 1] = resolve_hl(capture)
     end
   end
 
   -- syntax
-  if filter.syntax then
-    for _, i1 in ipairs(vim.fn.synstack(row + 1, col + 1)) do
-      table.insert(results.syntax, resolve_hl({ hl_group = vim.fn.synIDattr(i1, 'name') }))
-    end
+  if filter.syntax and vim.api.nvim_buf_is_valid(bufnr) then
+    vim.api.nvim_buf_call(bufnr, function()
+      for _, i1 in ipairs(vim.fn.synstack(row + 1, col + 1)) do
+        results.syntax[#results.syntax + 1] =
+          resolve_hl({ hl_group = vim.fn.synIDattr(i1, 'name') })
+      end
+    end)
   end
 
   -- namespace id -> name map
@@ -87,8 +89,7 @@ function vim.inspect_pos(bufnr, row, col, filter)
     nsmap[id] = name
   end
 
-  --- Convert an extmark tuple into a map-like table
-  --- @private
+  --- Convert an extmark tuple into a table
   local function to_map(extmark)
     extmark = {
       id = extmark[1],
@@ -104,7 +105,6 @@ function vim.inspect_pos(bufnr, row, col, filter)
   end
 
   --- Check if an extmark overlaps this position
-  --- @private
   local function is_here(extmark)
     return (row >= extmark.row and row <= extmark.end_row) -- within the rows of the extmark
       and (row > extmark.row or col >= extmark.col) -- either not the first row, or in range of the col
@@ -145,17 +145,14 @@ function vim.show_pos(bufnr, row, col, filter)
 
   local lines = { {} }
 
-  ---@private
   local function append(str, hl)
     table.insert(lines[#lines], { str, hl })
   end
 
-  ---@private
   local function nl()
     table.insert(lines, {})
   end
 
-  ---@private
   local function item(data, comment)
     append('  - ')
     append(data.hl_group, data.hl_group)

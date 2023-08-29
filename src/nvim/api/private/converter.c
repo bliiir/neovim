@@ -49,9 +49,9 @@ typedef struct {
 #define TYPVAL_ENCODE_CONV_STRING(tv, str, len) \
   do { \
     const size_t len_ = (size_t)(len); \
-    const char *const str_ = (const char *)(str); \
+    const char *const str_ = (str); \
     assert(len_ == 0 || str_ != NULL); \
-    kvi_push(edata->stack, STRING_OBJ(cbuf_to_string((len_?str_:""), len_))); \
+    kvi_push(edata->stack, STRING_OBJ(cbuf_to_string((len_ ? str_ : ""), len_))); \
   } while (0)
 
 #define TYPVAL_ENCODE_CONV_STR_STRING TYPVAL_ENCODE_CONV_STRING
@@ -256,7 +256,7 @@ Object vim_to_object(typval_T *obj)
   return ret;
 }
 
-/// Converts from type Object to a VimL value.
+/// Converts from type Object to a Vimscript value.
 ///
 /// @param obj  Object to convert from.
 /// @param tv   Conversion result is placed here. On failure member v_type is
@@ -275,7 +275,7 @@ bool object_to_vim(Object obj, typval_T *tv, Error *err)
 
   case kObjectTypeBoolean:
     tv->v_type = VAR_BOOL;
-    tv->vval.v_bool = obj.data.boolean? kBoolVarTrue: kBoolVarFalse;
+    tv->vval.v_bool = obj.data.boolean ? kBoolVarTrue : kBoolVarFalse;
     break;
 
   case kObjectTypeBuffer:
@@ -283,7 +283,7 @@ bool object_to_vim(Object obj, typval_T *tv, Error *err)
   case kObjectTypeTabpage:
   case kObjectTypeInteger:
     STATIC_ASSERT(sizeof(obj.data.integer) <= sizeof(varnumber_T),
-                  "Integer size must be <= VimL number size");
+                  "Integer size must be <= Vimscript number size");
     tv->v_type = VAR_NUMBER;
     tv->vval.v_number = (varnumber_T)obj.data.integer;
     break;

@@ -39,6 +39,10 @@ describe('autocmd api', function()
       }))
       eq("Invalid 'event' item: expected String, got Array", pcall_err(meths.create_autocmd,
         {'FileType', {}}, {}))
+      eq("Invalid 'group': 0", pcall_err(meths.create_autocmd, 'FileType', {
+        group = 0,
+        command = 'ls',
+      }))
     end)
 
     it('doesnt leak when you use ++once', function()
@@ -224,23 +228,28 @@ describe('autocmd api', function()
     end)
 
     it('receives an args table', function()
-      local res = exec_lua [[
-        local group_id = vim.api.nvim_create_augroup("TestGroup", {})
-        local autocmd_id = vim.api.nvim_create_autocmd("User", {
+      local group_id = meths.create_augroup("TestGroup", {})
+      -- Having an existing autocmd calling expand("<afile>") shouldn't change args #18964
+      meths.create_autocmd('User', {
+        group = 'TestGroup',
+        pattern = 'Te*',
+        command = 'call expand("<afile>")',
+      })
+
+      local autocmd_id = exec_lua [[
+        return vim.api.nvim_create_autocmd("User", {
           group = "TestGroup",
           pattern = "Te*",
           callback = function(args)
             vim.g.autocmd_args = args
           end,
         })
-
-        return {group_id, autocmd_id}
       ]]
 
       meths.exec_autocmds("User", {pattern = "Test pattern"})
       eq({
-        id = res[2],
-        group = res[1],
+        id = autocmd_id,
+        group = group_id,
         event = "User",
         match = "Test pattern",
         file = "Test pattern",
@@ -248,27 +257,24 @@ describe('autocmd api', function()
       }, meths.get_var("autocmd_args"))
 
       -- Test without a group
-      res = exec_lua [[
-        local autocmd_id = vim.api.nvim_create_autocmd("User", {
+      autocmd_id = exec_lua [[
+        return vim.api.nvim_create_autocmd("User", {
           pattern = "*",
           callback = function(args)
             vim.g.autocmd_args = args
           end,
         })
-
-        return {autocmd_id}
       ]]
 
       meths.exec_autocmds("User", {pattern = "some_pat"})
       eq({
-        id = res[1],
+        id = autocmd_id,
         group = nil,
         event = "User",
         match = "some_pat",
         file = "some_pat",
         buf = 1,
       }, meths.get_var("autocmd_args"))
-
     end)
 
     it('can receive arbitrary data', function()
@@ -307,6 +313,9 @@ describe('autocmd api', function()
       }))
       eq("Invalid 'group': 'bogus'", pcall_err(meths.get_autocmds, {
         group = 'bogus',
+      }))
+      eq("Invalid 'group': 0", pcall_err(meths.get_autocmds, {
+        group = 0,
       }))
       eq("Invalid 'group': expected String or Integer, got Array", pcall_err(meths.get_autocmds, {
         group = {},
@@ -725,7 +734,10 @@ describe('autocmd api', function()
       eq("Invalid 'group': expected String or Integer, got Array", pcall_err(meths.exec_autocmds, 'FileType', {
         group = {},
       }))
-      eq("Invalid 'buffer': expected Integer, got Array", pcall_err(meths.exec_autocmds, 'FileType', {
+      eq("Invalid 'group': 0", pcall_err(meths.exec_autocmds, 'FileType', {
+        group = 0,
+      }))
+      eq("Invalid 'buffer': expected Buffer, got Array", pcall_err(meths.exec_autocmds, 'FileType', {
         buffer = {},
       }))
       eq("Invalid 'event' item: expected String, got Array", pcall_err(meths.exec_autocmds,
@@ -1049,6 +1061,12 @@ describe('autocmd api', function()
 
       eq(false, exec_lua[[return pcall(vim.api.nvim_del_augroup_by_id, -12342)]])
       eq('Vim:E367: No such group: "--Deleted--"', pcall_err(meths.del_augroup_by_id, -12312))
+
+      eq(false, exec_lua[[return pcall(vim.api.nvim_del_augroup_by_id, 0)]])
+      eq('Vim:E367: No such group: "[NULL]"', pcall_err(meths.del_augroup_by_id, 0))
+
+      eq(false, exec_lua[[return pcall(vim.api.nvim_del_augroup_by_id, 12342)]])
+      eq('Vim:E367: No such group: "[NULL]"', pcall_err(meths.del_augroup_by_id, 12312))
     end)
 
     it('groups work with once', function()
@@ -1224,6 +1242,7 @@ describe('autocmd api', function()
       eq("Invalid 'event' item: expected String, got Array", pcall_err(meths.clear_autocmds, {
         event = {'FileType', {}}
       }))
+      eq("Invalid 'group': 0", pcall_err(meths.clear_autocmds, {group = 0}))
     end)
 
     it('should clear based on event + pattern', function()

@@ -39,7 +39,10 @@ local M = setmetatable({}, {
   end,
 })
 
+--- @nodoc
 M.language_version = vim._ts_get_language_version()
+
+--- @nodoc
 M.minimum_language_version = vim._ts_get_minimum_language_version()
 
 --- Creates a new parser
@@ -60,12 +63,10 @@ function M._create_parser(bufnr, lang, opts)
 
   local self = LanguageTree.new(bufnr, lang, opts)
 
-  ---@private
   local function bytes_cb(_, ...)
     self:_on_bytes(...)
   end
 
-  ---@private
   local function detach_cb(_, ...)
     if parsers[bufnr] == self then
       parsers[bufnr] = nil
@@ -73,7 +74,6 @@ function M._create_parser(bufnr, lang, opts)
     self:_on_detach(...)
   end
 
-  ---@private
   local function reload_cb(_)
     self:_on_reload()
   end
@@ -91,7 +91,6 @@ function M._create_parser(bufnr, lang, opts)
   return self
 end
 
---- @private
 local function valid_lang(lang)
   return lang and lang ~= ''
 end
@@ -134,16 +133,6 @@ function M.get_parser(bufnr, lang, opts)
   parsers[bufnr]:register_cbs(opts.buf_attach_cbs)
 
   return parsers[bufnr]
-end
-
----@package
----@param bufnr (integer|nil) Buffer number
----@return boolean
-function M._has_parser(bufnr)
-  if bufnr == nil or bufnr == 0 then
-    bufnr = api.nvim_get_current_buf()
-  end
-  return parsers[bufnr] ~= nil
 end
 
 --- Returns a string parser
@@ -215,7 +204,6 @@ function M.get_range(node, source, metadata)
   return { node:range(true) }
 end
 
----@private
 ---@param buf integer
 ---@param range Range
 ---@returns string
@@ -474,7 +462,7 @@ end
 ---
 ---@param bufnr (integer|nil) Buffer to stop highlighting (default: current buffer)
 function M.stop(bufnr)
-  bufnr = bufnr or api.nvim_get_current_buf()
+  bufnr = (bufnr and bufnr ~= 0) and bufnr or api.nvim_get_current_buf()
 
   if M.highlighter.active[bufnr] then
     M.highlighter.active[bufnr]:destroy()
@@ -484,8 +472,8 @@ end
 --- Open a window that displays a textual representation of the nodes in the language tree.
 ---
 --- While in the window, press "a" to toggle display of anonymous nodes, "I" to toggle the
---- display of the source language of each node, and press <Enter> to jump to the node under the
---- cursor in the source buffer.
+--- display of the source language of each node, "o" to toggle the query previewer, and press
+--- <Enter> to jump to the node under the cursor in the source buffer.
 ---
 --- Can also be shown with `:InspectTree`. *:InspectTree*
 ---
@@ -503,7 +491,14 @@ end
 ---                        argument and should return a string.
 function M.inspect_tree(opts)
   ---@cast opts InspectTreeOpts
-  require('vim.treesitter.playground').inspect_tree(opts)
+  require('vim.treesitter.dev').inspect_tree(opts)
+end
+
+--- Open a window for live editing of a treesitter query.
+---
+--- Can also be shown with `:PreviewQuery`. *:PreviewQuery*
+function M.preview_query()
+  require('vim.treesitter.dev').preview_query()
 end
 
 --- Returns the fold level for {lnum} in the current buffer. Can be set directly to 'foldexpr':

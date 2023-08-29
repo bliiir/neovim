@@ -1251,6 +1251,98 @@ AAAB]]
       ]]}
     end)
   end)
+
+  it('redraws with a change to non-current buffer', function()
+    write_file(fname, "aaa\nbbb\nccc\n\nxx", false)
+    write_file(fname_2, "aaa\nbbb\nccc\n\nyy", false)
+    reread()
+    local buf = meths.get_current_buf()
+    command('botright new')
+    screen:expect{grid=[[
+      {1:  }aaa               │{1:  }aaa              |
+      {1:  }bbb               │{1:  }bbb              |
+      {1:  }ccc               │{1:  }ccc              |
+      {1:  }                  │{1:  }                 |
+      {1:  }{8:xx}{9:                }│{1:  }{8:yy}{9:               }|
+      {6:~                   }│{6:~                  }|
+      {3:<onal-diff-screen-1  <l-diff-screen-1.2 }|
+      ^                                        |
+      {6:~                                       }|
+      {6:~                                       }|
+      {6:~                                       }|
+      {6:~                                       }|
+      {6:~                                       }|
+      {6:~                                       }|
+      {7:[No Name]                               }|
+      :e                                      |
+    ]]}
+
+    meths.buf_set_lines(buf, 1, 2, true, {'BBB'})
+    screen:expect{grid=[[
+      {1:  }aaa               │{1:  }aaa              |
+      {1:  }{8:BBB}{9:               }│{1:  }{8:bbb}{9:              }|
+      {1:  }ccc               │{1:  }ccc              |
+      {1:  }                  │{1:  }                 |
+      {1:  }{8:xx}{9:                }│{1:  }{8:yy}{9:               }|
+      {6:~                   }│{6:~                  }|
+      {3:<-diff-screen-1 [+]  <l-diff-screen-1.2 }|
+      ^                                        |
+      {6:~                                       }|
+      {6:~                                       }|
+      {6:~                                       }|
+      {6:~                                       }|
+      {6:~                                       }|
+      {6:~                                       }|
+      {7:[No Name]                               }|
+      :e                                      |
+    ]]}
+  end)
+
+ it('redraws with a change current buffer in another window', function()
+    write_file(fname, "aaa\nbbb\nccc\n\nxx", false)
+    write_file(fname_2, "aaa\nbbb\nccc\n\nyy", false)
+    reread()
+    local buf = meths.get_current_buf()
+    command('botright split | diffoff')
+    screen:expect{grid=[[
+      {1:  }aaa               │{1:  }aaa              |
+      {1:  }bbb               │{1:  }bbb              |
+      {1:  }ccc               │{1:  }ccc              |
+      {1:  }                  │{1:  }                 |
+      {1:  }{8:xx}{9:                }│{1:  }{8:yy}{9:               }|
+      {6:~                   }│{6:~                  }|
+      {3:<onal-diff-screen-1  <l-diff-screen-1.2 }|
+      ^aaa                                     |
+      bbb                                     |
+      ccc                                     |
+                                              |
+      xx                                      |
+      {6:~                                       }|
+      {6:~                                       }|
+      {7:Xtest-functional-diff-screen-1          }|
+      :e                                      |
+    ]]}
+
+    meths.buf_set_lines(buf, 1, 2, true, {'BBB'})
+    screen:expect{grid=[[
+      {1:  }aaa               │{1:  }aaa              |
+      {1:  }{8:BBB}{9:               }│{1:  }{8:bbb}{9:              }|
+      {1:  }ccc               │{1:  }ccc              |
+      {1:  }                  │{1:  }                 |
+      {1:  }{8:xx}{9:                }│{1:  }{8:yy}{9:               }|
+      {6:~                   }│{6:~                  }|
+      {3:<-diff-screen-1 [+]  <l-diff-screen-1.2 }|
+      ^aaa                                     |
+      BBB                                     |
+      ccc                                     |
+                                              |
+      xx                                      |
+      {6:~                                       }|
+      {6:~                                       }|
+      {7:Xtest-functional-diff-screen-1 [+]      }|
+      :e                                      |
+    ]]}
+  end)
 end)
 
 it('win_update redraws lines properly', function()
@@ -1325,6 +1417,7 @@ it('win_update redraws lines properly', function()
   ]]}
 end)
 
+-- oldtest: Test_diff_rnu()
 it('diff updates line numbers below filler lines', function()
   clear()
   local screen = Screen.new(40, 14)
@@ -1401,6 +1494,7 @@ it('diff updates line numbers below filler lines', function()
   ]])
 end)
 
+-- oldtest: Test_diff_with_scroll_and_change()
 it('Align the filler lines when changing text in diff mode', function()
   clear()
   local screen = Screen.new(40, 20)

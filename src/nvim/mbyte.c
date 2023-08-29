@@ -367,7 +367,7 @@ static int enc_canon_search(const char *name)
 int enc_canon_props(const char *name)
   FUNC_ATTR_PURE
 {
-  int i = enc_canon_search((char *)name);
+  int i = enc_canon_search(name);
   if (i >= 0) {
     return enc_canon_table[i].prop;
   } else if (strncmp(name, "2byte-", 6) == 0) {
@@ -538,9 +538,9 @@ int utf_ptr2cells_len(const char *p, int size)
     if (utf_ptr2len_len(p, size) < utf8len_tab[(uint8_t)(*p)]) {
       return 1;        // truncated
     }
-    int c = utf_ptr2char((char *)p);
+    int c = utf_ptr2char(p);
     // An illegal byte is displayed as <xx>.
-    if (utf_ptr2len((char *)p) == 1 || c == NUL) {
+    if (utf_ptr2len(p) == 1 || c == NUL) {
       return 4;
     }
     // If the char is ASCII it must be an overlong sequence.
@@ -719,14 +719,14 @@ bool utf_composinglike(const char *p1, const char *p2)
 {
   int c2;
 
-  c2 = utf_ptr2char((char *)p2);
+  c2 = utf_ptr2char(p2);
   if (utf_iscomposing(c2)) {
     return true;
   }
   if (!arabic_maycombine(c2)) {
     return false;
   }
-  return arabic_combine(utf_ptr2char((char *)p1), c2);
+  return arabic_combine(utf_ptr2char(p1), c2);
 }
 
 /// Convert a UTF-8 string to a wide character
@@ -749,7 +749,7 @@ int utfc_ptr2char(const char *p, int *pcc)
       && (uint8_t)p[len] >= 0x80
       && utf_composinglike(p, p + len)) {
     int cc = utf_ptr2char(p + len);
-    for (;;) {
+    while (true) {
       pcc[i++] = cc;
       if (i == MAX_MCO) {
         break;
@@ -889,7 +889,7 @@ int utfc_ptr2len(const char *const p)
   // Check for composing characters.  We can handle only the first six, but
   // skip all of them (otherwise the cursor would get stuck).
   int prevlen = 0;
-  for (;;) {
+  while (true) {
     if ((uint8_t)p[len] < 0x80 || !utf_composinglike(p + prevlen, p + len)) {
       return len;
     }
@@ -1051,9 +1051,9 @@ int utf_class_tab(const int c, const uint64_t *const chartab)
 {
   // sorted list of non-overlapping intervals
   static struct clinterval {
-    unsigned int first;
-    unsigned int last;
-    unsigned int class;
+    unsigned first;
+    unsigned last;
+    unsigned cls;
   } classes[] = {
     { 0x037e, 0x037e, 1 },              // Greek question mark
     { 0x0387, 0x0387, 1 },              // Greek ano teleia
@@ -1149,12 +1149,12 @@ int utf_class_tab(const int c, const uint64_t *const chartab)
   // binary search in table
   while (top >= bot) {
     int mid = (bot + top) / 2;
-    if (classes[mid].last < (unsigned int)c) {
+    if (classes[mid].last < (unsigned)c) {
       bot = mid + 1;
-    } else if (classes[mid].first > (unsigned int)c) {
+    } else if (classes[mid].first > (unsigned)c) {
       top = mid - 1;
     } else {
-      return (int)classes[mid].class;
+      return (int)classes[mid].cls;
     }
   }
 
@@ -1276,7 +1276,7 @@ static int utf_strnicmp(const char *s1, const char *s2, size_t n1, size_t n2)
   int c1, c2, cdiff;
   char buffer[6];
 
-  for (;;) {
+  while (true) {
     c1 = utf_safe_read_char_adv(&s1, &n1);
     c2 = utf_safe_read_char_adv(&s2, &n2);
 
@@ -1312,10 +1312,10 @@ static int utf_strnicmp(const char *s1, const char *s2, size_t n1, size_t n2)
   // to fold just one character to determine the result of comparison.
 
   if (c1 != -1 && c2 == -1) {
-    n1 = (size_t)utf_char2bytes(utf_fold(c1), (char *)buffer);
+    n1 = (size_t)utf_char2bytes(utf_fold(c1), buffer);
     s1 = buffer;
   } else if (c2 != -1 && c1 == -1) {
-    n2 = (size_t)utf_char2bytes(utf_fold(c2), (char *)buffer);
+    n2 = (size_t)utf_char2bytes(utf_fold(c2), buffer);
     s2 = buffer;
   }
 
@@ -1881,7 +1881,7 @@ void utf_find_illegal(void)
   }
 
   curwin->w_cursor.coladd = 0;
-  for (;;) {
+  while (true) {
     p = get_cursor_pos_ptr();
     if (vimconv.vc_type != CONV_NONE) {
       xfree(tofree);
@@ -1970,7 +1970,7 @@ void mb_check_adjust_col(void *win_)
 
   // Column 0 is always valid.
   if (oldcol != 0) {
-    char *p = ml_get_buf(win->w_buffer, win->w_cursor.lnum, false);
+    char *p = ml_get_buf(win->w_buffer, win->w_cursor.lnum);
     colnr_T len = (colnr_T)strlen(p);
 
     // Empty line or invalid column?
@@ -2019,6 +2019,24 @@ int mb_charlen(const char *str)
 
   for (count = 0; *p != NUL; count++) {
     p += utfc_ptr2len(p);
+  }
+
+  return count;
+}
+
+int mb_charlen2bytelen(const char *str, int charlen)
+{
+  const char *p = str;
+  int count = 0;
+
+  if (p == NULL) {
+    return 0;
+  }
+
+  for (int i = 0; *p != NUL && i < charlen; i++) {
+    int b = utfc_ptr2len(p);
+    p += b;
+    count += b;
   }
 
   return count;
@@ -2299,7 +2317,7 @@ static char *iconv_string(const vimconv_T *const vcp, const char *str, size_t sl
 
   from = str;
   fromlen = slen;
-  for (;;) {
+  while (true) {
     if (len == 0 || ICONV_ERRNO == ICONV_E2BIG) {
       // Allocate enough room for most conversions.  When re-allocating
       // increase the buffer size.
@@ -2359,6 +2377,34 @@ static char *iconv_string(const vimconv_T *const vcp, const char *str, size_t sl
     *resultlenp = (size_t)(to - result);
   }
   return result;
+}
+
+/// iconv() function
+void f_iconv(typval_T *argvars, typval_T *rettv, EvalFuncData fptr)
+{
+  vimconv_T vimconv;
+
+  rettv->v_type = VAR_STRING;
+  rettv->vval.v_string = NULL;
+
+  const char *const str = tv_get_string(&argvars[0]);
+  char buf1[NUMBUFLEN];
+  char *const from = enc_canonize(enc_skip((char *)tv_get_string_buf(&argvars[1], buf1)));
+  char buf2[NUMBUFLEN];
+  char *const to = enc_canonize(enc_skip((char *)tv_get_string_buf(&argvars[2], buf2)));
+  vimconv.vc_type = CONV_NONE;
+  convert_setup(&vimconv, from, to);
+
+  // If the encodings are equal, no conversion needed.
+  if (vimconv.vc_type == CONV_NONE) {
+    rettv->vval.v_string = xstrdup(str);
+  } else {
+    rettv->vval.v_string = string_convert(&vimconv, (char *)str, NULL);
+  }
+
+  convert_setup(&vimconv, NULL, NULL);
+  xfree(from);
+  xfree(to);
 }
 
 /// Setup "vcp" for conversion from "from" to "to".

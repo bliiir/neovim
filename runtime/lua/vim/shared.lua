@@ -6,7 +6,47 @@
 -- or the test suite. (Eventually the test suite will be run in a worker process,
 -- so this wouldn't be a separate case to consider)
 
+---@diagnostic disable-next-line: lowercase-global
 vim = vim or {}
+
+local function _id(v)
+  return v
+end
+
+local deepcopy
+
+local deepcopy_funcs = {
+  table = function(orig, cache)
+    if cache[orig] then
+      return cache[orig]
+    end
+    local copy = {}
+
+    cache[orig] = copy
+    local mt = getmetatable(orig)
+    for k, v in pairs(orig) do
+      copy[deepcopy(k, cache)] = deepcopy(v, cache)
+    end
+    return setmetatable(copy, mt)
+  end,
+  number = _id,
+  string = _id,
+  ['nil'] = _id,
+  boolean = _id,
+  ['function'] = _id,
+}
+
+deepcopy = function(orig, _cache)
+  local f = deepcopy_funcs[type(orig)]
+  if f then
+    return f(orig, _cache or {})
+  else
+    if type(orig) == 'userdata' and orig == vim.NIL then
+      return vim.NIL
+    end
+    error('Cannot deepcopy object of type ' .. type(orig))
+  end
+end
 
 --- Returns a deep copy of the given object. Non-table objects are copied as
 --- in a typical Lua assignment, whereas table objects are copied recursively.
@@ -17,47 +57,12 @@ vim = vim or {}
 ---@generic T: table
 ---@param orig T Table to copy
 ---@return T Table of copied keys and (nested) values.
-function vim.deepcopy(orig) end -- luacheck: no unused
-vim.deepcopy = (function()
-  local function _id(v)
-    return v
-  end
+function vim.deepcopy(orig)
+  return deepcopy(orig)
+end
 
-  local deepcopy_funcs = {
-    table = function(orig, cache)
-      if cache[orig] then
-        return cache[orig]
-      end
-      local copy = {}
-
-      cache[orig] = copy
-      local mt = getmetatable(orig)
-      for k, v in pairs(orig) do
-        copy[vim.deepcopy(k, cache)] = vim.deepcopy(v, cache)
-      end
-      return setmetatable(copy, mt)
-    end,
-    number = _id,
-    string = _id,
-    ['nil'] = _id,
-    boolean = _id,
-    ['function'] = _id,
-  }
-
-  return function(orig, cache)
-    local f = deepcopy_funcs[type(orig)]
-    if f then
-      return f(orig, cache or {})
-    else
-      if type(orig) == 'userdata' and orig == vim.NIL then
-        return vim.NIL
-      end
-      error('Cannot deepcopy object of type ' .. type(orig))
-    end
-  end
-end)()
-
---- Splits a string at each instance of a separator.
+--- Gets an |iterator| that splits a string at each instance of a separator, in "lazy" fashion
+--- (as opposed to |vim.split()| which is "eager").
 ---
 --- Example:
 ---   <pre>lua
@@ -76,7 +81,7 @@ end)()
 ---
 --- @see |string.gmatch()|
 --- @see |vim.split()|
---- @see |luaref-patterns|
+--- @see |lua-patterns|
 --- @see https://www.lua.org/pil/20.2.html
 --- @see http://lua-users.org/wiki/StringLibraryTutorial
 ---
@@ -100,10 +105,9 @@ function vim.gsplit(s, sep, opts)
   local start = 1
   local done = false
 
-  -- For `trimempty`:
+  -- For `trimempty`: queue of collected segments, to be emitted at next pass.
+  local segs = {}
   local empty_start = true -- Only empty segments seen so far.
-  local empty_segs = 0 -- Empty segments found between non-empty segments.
-  local nonemptyseg = nil
 
   local function _pass(i, j, ...)
     if i then
@@ -118,14 +122,9 @@ function vim.gsplit(s, sep, opts)
   end
 
   return function()
-    if trimempty and empty_segs > 0 then
-      -- trimempty: Pop the collected empty segments.
-      empty_segs = empty_segs - 1
-      return ''
-    elseif trimempty and nonemptyseg then
-      local seg = nonemptyseg
-      nonemptyseg = nil
-      return seg
+    if trimempty and #segs > 0 then
+      -- trimempty: Pop the collected segments.
+      return table.remove(segs)
     elseif done or (s == '' and sep == '') then
       return nil
     elseif sep == '' then
@@ -138,28 +137,32 @@ function vim.gsplit(s, sep, opts)
     local seg = _pass(s:find(sep, start, plain))
 
     -- Trim empty segments from start/end.
-    if trimempty and seg == '' then
+    if trimempty and seg ~= '' then
+      empty_start = false
+    elseif trimempty and seg == '' then
       while not done and seg == '' do
-        empty_segs = empty_segs + 1
+        table.insert(segs, 1, '')
         seg = _pass(s:find(sep, start, plain))
       end
       if done and seg == '' then
         return nil
       elseif empty_start then
         empty_start = false
-        empty_segs = 0
+        segs = {}
         return seg
       end
-      nonemptyseg = seg ~= '' and seg or nil
-      seg = ''
-      empty_segs = empty_segs - 1
+      if seg ~= '' then
+        table.insert(segs, 1, seg)
+      end
+      return table.remove(segs)
     end
 
     return seg
   end
 end
 
---- Splits a string at each instance of a separator.
+--- Splits a string at each instance of a separator and returns the result as a table (unlike
+--- |vim.gsplit()|).
 ---
 --- Examples:
 --- <pre>lua
@@ -252,12 +255,53 @@ function vim.tbl_filter(func, t)
   return rettab
 end
 
---- Checks if a list-like (vector) table contains `value`.
+--- Checks if a table contains a given value, specified either directly or via
+--- a predicate that is checked for each value.
+---
+--- Example:
+--- <pre>lua
+---  vim.tbl_contains({ 'a', { 'b', 'c' } }, function(v)
+---    return vim.deep_equal(v, { 'b', 'c' })
+---  end, { predicate = true })
+---  -- true
+--- </pre>
+---
+---@see |vim.list_contains()| for checking values in list-like tables
 ---
 ---@param t table Table to check
+---@param value any Value to compare or predicate function reference
+---@param opts (table|nil) Keyword arguments |kwargs|:
+---       - predicate: (boolean) `value` is a function reference to be checked (default false)
+---@return boolean `true` if `t` contains `value`
+function vim.tbl_contains(t, value, opts)
+  vim.validate({ t = { t, 't' }, opts = { opts, 't', true } })
+
+  local pred
+  if opts and opts.predicate then
+    vim.validate({ value = { value, 'c' } })
+    pred = value
+  else
+    pred = function(v)
+      return v == value
+    end
+  end
+
+  for _, v in pairs(t) do
+    if pred(v) then
+      return true
+    end
+  end
+  return false
+end
+
+--- Checks if a list-like table (integer keys without gaps) contains `value`.
+---
+---@see |vim.tbl_contains()| for checking values in general tables
+---
+---@param t table Table to check (must be list-like, not validated)
 ---@param value any Value to compare
 ---@return boolean `true` if `t` contains `value`
-function vim.tbl_contains(t, value)
+function vim.list_contains(t, value)
   vim.validate({ t = { t, 't' } })
 
   for _, v in ipairs(t) do
@@ -279,10 +323,9 @@ function vim.tbl_isempty(t)
   return next(t) == nil
 end
 
---- We only merge empty tables or tables that are not a list
----@private
+--- We only merge empty tables or tables that are not an array (indexed by integers)
 local function can_merge(v)
-  return type(v) == 'table' and (vim.tbl_isempty(v) or not vim.tbl_islist(v))
+  return type(v) == 'table' and (vim.tbl_isempty(v) or not vim.tbl_isarray(v))
 end
 
 local function tbl_extend(behavior, deep_extend, ...)
@@ -323,7 +366,7 @@ local function tbl_extend(behavior, deep_extend, ...)
   return ret
 end
 
---- Merges two or more map-like tables.
+--- Merges two or more tables.
 ---
 ---@see |extend()|
 ---
@@ -331,13 +374,13 @@ end
 ---      - "error": raise an error
 ---      - "keep":  use value from the leftmost map
 ---      - "force": use value from the rightmost map
----@param ... table Two or more map-like tables
+---@param ... table Two or more tables
 ---@return table Merged table
 function vim.tbl_extend(behavior, ...)
   return tbl_extend(behavior, false, ...)
 end
 
---- Merges recursively two or more map-like tables.
+--- Merges recursively two or more tables.
 ---
 ---@see |vim.tbl_extend()|
 ---
@@ -347,7 +390,7 @@ end
 ---      - "error": raise an error
 ---      - "keep":  use value from the leftmost map
 ---      - "force": use value from the rightmost map
----@param ... T2 Two or more map-like tables
+---@param ... T2 Two or more tables
 ---@return T1|T2 (table) Merged table
 function vim.tbl_deep_extend(behavior, ...)
   return tbl_extend(behavior, true, ...)
@@ -418,7 +461,7 @@ end
 --- </pre>
 ---
 ---@param o table Table to index
----@param ... string Optional strings (0 or more, variadic) via which to index the table
+---@param ... any Optional keys (0 or more, variadic) via which to index the table
 ---
 ---@return any Nested value indexed by key (if it exists), else nil
 function vim.tbl_get(o, ...)
@@ -490,8 +533,8 @@ end
 ---
 ---@see Based on https://github.com/premake/premake-core/blob/master/src/base/table.lua
 ---
----@param t table List-like table
----@return iterator over sorted keys and their values
+---@param t table Dict-like table
+---@return function iterator over sorted keys and their values
 function vim.spairs(t)
   assert(type(t) == 'table', string.format('Expected table, got %s', type(t)))
 
@@ -513,15 +556,15 @@ function vim.spairs(t)
   end
 end
 
---- Tests if a Lua table can be treated as an array.
+--- Tests if a Lua table can be treated as an array (a table indexed by integers).
 ---
 --- Empty table `{}` is assumed to be an array, unless it was created by
 --- |vim.empty_dict()| or returned as a dict-like |API| or Vimscript result,
 --- for example from |rpcrequest()| or |vim.fn|.
 ---
----@param t table Table
----@return boolean `true` if array-like table, else `false`
-function vim.tbl_islist(t)
+---@param t table
+---@return boolean `true` if array-like table, else `false`.
+function vim.tbl_isarray(t)
   if type(t) ~= 'table' then
     return false
   end
@@ -529,7 +572,8 @@ function vim.tbl_islist(t)
   local count = 0
 
   for k, _ in pairs(t) do
-    if type(k) == 'number' then
+    --- Check if the number k is an integer
+    if type(k) == 'number' and k == math.floor(k) then
       count = count + 1
     else
       return false
@@ -545,6 +589,38 @@ function vim.tbl_islist(t)
       return false
     end
     return getmetatable(t) ~= vim._empty_dict_mt
+  end
+end
+
+--- Tests if a Lua table can be treated as a list (a table indexed by consecutive integers starting from 1).
+---
+--- Empty table `{}` is assumed to be an list, unless it was created by
+--- |vim.empty_dict()| or returned as a dict-like |API| or Vimscript result,
+--- for example from |rpcrequest()| or |vim.fn|.
+---
+---@param t table
+---@return boolean `true` if list-like table, else `false`.
+function vim.tbl_islist(t)
+  if type(t) ~= 'table' then
+    return false
+  end
+
+  local num_elem = vim.tbl_count(t)
+
+  if num_elem == 0 then
+    -- TODO(bfredl): in the future, we will always be inside nvim
+    -- then this check can be deleted.
+    if vim._empty_dict_mt == nil then
+      return nil
+    end
+    return getmetatable(t) ~= vim._empty_dict_mt
+  else
+    for i = 1, num_elem do
+      if t[i] == nil then
+        return false
+      end
+    end
+    return true
   end
 end
 
@@ -585,7 +661,7 @@ end
 
 --- Trim whitespace (Lua pattern "%s") from both sides of a string.
 ---
----@see |luaref-patterns|
+---@see |lua-patterns|
 ---@see https://www.lua.org/pil/20.2.html
 ---@param s string String to trim
 ---@return string String with whitespace removed from its beginning and end
@@ -699,7 +775,6 @@ do
     return type(val) == t or (t == 'callable' and vim.is_callable(val))
   end
 
-  ---@private
   local function is_valid(opt)
     if type(opt) ~= 'table' then
       return false, string.format('opt: expected table, got %s', type(opt))
@@ -810,5 +885,98 @@ function vim.defaulttable(create)
   })
 end
 
+do
+  ---@class vim.Ringbuf<T>
+  ---@field private _items table[]
+  ---@field private _idx_read integer
+  ---@field private _idx_write integer
+  ---@field private _size integer
+  local Ringbuf = {}
+
+  --- Clear all items
+  function Ringbuf.clear(self)
+    self._items = {}
+    self._idx_read = 0
+    self._idx_write = 0
+  end
+
+  --- Adds an item, overriding the oldest item if the buffer is full.
+  ---@generic T
+  ---@param item T
+  function Ringbuf.push(self, item)
+    self._items[self._idx_write] = item
+    self._idx_write = (self._idx_write + 1) % self._size
+    if self._idx_write == self._idx_read then
+      self._idx_read = (self._idx_read + 1) % self._size
+    end
+  end
+
+  --- Removes and returns the first unread item
+  ---@generic T
+  ---@return T?
+  function Ringbuf.pop(self)
+    local idx_read = self._idx_read
+    if idx_read == self._idx_write then
+      return nil
+    end
+    local item = self._items[idx_read]
+    self._items[idx_read] = nil
+    self._idx_read = (idx_read + 1) % self._size
+    return item
+  end
+
+  --- Returns the first unread item without removing it
+  ---@generic T
+  ---@return T?
+  function Ringbuf.peek(self)
+    if self._idx_read == self._idx_write then
+      return nil
+    end
+    return self._items[self._idx_read]
+  end
+
+  --- Create a ring buffer limited to a maximal number of items.
+  --- Once the buffer is full, adding a new entry overrides the oldest entry.
+  ---
+  --- <pre>
+  ---   local ringbuf = vim.ringbuf(4)
+  ---   ringbuf:push("a")
+  ---   ringbuf:push("b")
+  ---   ringbuf:push("c")
+  ---   ringbuf:push("d")
+  ---   ringbuf:push("e")    -- overrides "a"
+  ---   print(ringbuf:pop()) -- returns "b"
+  ---   print(ringbuf:pop()) -- returns "c"
+  ---
+  ---   -- Can be used as iterator. Pops remaining items:
+  ---   for val in ringbuf do
+  ---     print(val)
+  ---   end
+  --- </pre>
+  ---
+  --- Returns a Ringbuf instance with the following methods:
+  ---
+  --- - |Ringbuf:push()|
+  --- - |Ringbuf:pop()|
+  --- - |Ringbuf:peek()|
+  --- - |Ringbuf:clear()|
+  ---
+  ---@param size integer
+  ---@return vim.Ringbuf ringbuf (table)
+  function vim.ringbuf(size)
+    local ringbuf = {
+      _items = {},
+      _size = size + 1,
+      _idx_read = 0,
+      _idx_write = 0,
+    }
+    return setmetatable(ringbuf, {
+      __index = Ringbuf,
+      __call = function(self)
+        return self:pop()
+      end,
+    })
+  end
+end
+
 return vim
--- vim:sw=2 ts=2 et

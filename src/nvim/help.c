@@ -22,6 +22,7 @@
 #include "nvim/globals.h"
 #include "nvim/help.h"
 #include "nvim/macros.h"
+#include "nvim/mark.h"
 #include "nvim/mbyte.h"
 #include "nvim/memline.h"
 #include "nvim/memory.h"
@@ -457,7 +458,7 @@ int find_help_tags(const char *arg, int *num_matches, char ***matches, bool keep
         // Replace "^x" by "CTRL-X". Don't do this for "^_" to make
         // ":help i_^_CTRL-D" work.
         // Insert '-' before and after "CTRL-X" when applicable.
-        if (*s < ' '
+        if ((uint8_t)(*s) < ' '
             || (*s == '^' && s[1]
                 && (ASCII_ISALPHA(s[1]) || vim_strchr("?@[\\]^", (uint8_t)s[1]) != NULL))) {
           if (d > IObuff && d[-1] != '_' && d[-1] != '\\') {
@@ -652,20 +653,20 @@ void fix_help_buffer(void)
   // Set filetype to "help".
   if (strcmp(curbuf->b_p_ft, "help") != 0) {
     curbuf->b_ro_locked++;
-    set_option_value_give_err("ft", 0L, "help", OPT_LOCAL);
+    set_option_value_give_err("ft", STATIC_CSTR_AS_OPTVAL("help"), OPT_LOCAL);
     curbuf->b_ro_locked--;
   }
 
   if (!syntax_present(curwin)) {
     bool in_example = false;
     for (lnum = 1; lnum <= curbuf->b_ml.ml_line_count; lnum++) {
-      line = ml_get_buf(curbuf, lnum, false);
+      line = ml_get_buf(curbuf, lnum);
       const size_t len = strlen(line);
       if (in_example && len > 0 && !ascii_iswhite(line[0])) {
         // End of example: non-white or '<' in first column.
         if (line[0] == '<') {
           // blank-out a '<' in the first column
-          line = ml_get_buf(curbuf, lnum, true);
+          line = ml_get_buf_mut(curbuf, lnum);
           line[0] = ' ';
         }
         in_example = false;
@@ -673,12 +674,12 @@ void fix_help_buffer(void)
       if (!in_example && len > 0) {
         if (line[len - 1] == '>' && (len == 1 || line[len - 2] == ' ')) {
           // blank-out a '>' in the last column (start of example)
-          line = ml_get_buf(curbuf, lnum, true);
+          line = ml_get_buf_mut(curbuf, lnum);
           line[len - 1] = ' ';
           in_example = true;
         } else if (line[len - 1] == '~') {
           // blank-out a '~' at the end of line (header marker)
-          line = ml_get_buf(curbuf, lnum, true);
+          line = ml_get_buf_mut(curbuf, lnum);
           line[len - 1] = ' ';
         }
       }
@@ -695,7 +696,7 @@ void fix_help_buffer(void)
           && TOLOWER_ASC(fname[7]) == 'x'
           && fname[8] == NUL)) {
     for (lnum = 1; lnum < curbuf->b_ml.ml_line_count; lnum++) {
-      line = ml_get_buf(curbuf, lnum, false);
+      line = ml_get_buf(curbuf, lnum);
       if (strstr(line, "*local-additions*") == NULL) {
         continue;
       }
@@ -835,7 +836,7 @@ void fix_help_buffer(void)
       linenr_T appended = lnum - lnum_start;
       if (appended) {
         mark_adjust(lnum_start + 1, (linenr_T)MAXLNUM, appended, 0L, kExtmarkUndo);
-        changed_lines_buf(curbuf, lnum_start + 1, lnum_start + 1, appended);
+        buf_redraw_changed_lines_later(curbuf, lnum_start + 1, lnum_start + 1, appended);
       }
       break;
     }
@@ -976,7 +977,7 @@ static void helptags_one(char *dir, const char *ext, const char *tagfname, bool 
       }
       p1 = vim_strchr(IObuff, '*');       // find first '*'
       while (p1 != NULL) {
-        p2 = strchr((const char *)p1 + 1, '*');  // Find second '*'.
+        p2 = strchr(p1 + 1, '*');  // Find second '*'.
         if (p2 != NULL && p2 > p1 + 1) {         // Skip "*" and "**".
           for (s = p1 + 1; s < p2; s++) {
             if (*s == ' ' || *s == '\t' || *s == '|') {
@@ -1154,17 +1155,24 @@ static void do_helptags(char *dirname, bool add_help_tags, bool ignore_writeerr)
       ext[1] = fname[5];
       ext[2] = fname[6];
     }
-    helptags_one(dirname, (char *)ext, (char *)fname, add_help_tags, ignore_writeerr);
+    helptags_one(dirname, ext, fname, add_help_tags, ignore_writeerr);
   }
 
   ga_clear(&ga);
   FreeWild(filecount, files);
 }
 
-static void helptags_cb(char *fname, void *cookie)
+static bool helptags_cb(int num_fnames, char **fnames, bool all, void *cookie)
   FUNC_ATTR_NONNULL_ALL
 {
-  do_helptags(fname, *(bool *)cookie, true);
+  for (int i = 0; i < num_fnames; i++) {
+    do_helptags(fnames[i], *(bool *)cookie, true);
+    if (!all) {
+      return true;
+    }
+  }
+
+  return num_fnames > 0;
 }
 
 /// ":helptags"
@@ -1180,7 +1188,7 @@ void ex_helptags(exarg_T *eap)
   }
 
   if (strcmp(eap->arg, "ALL") == 0) {
-    do_in_path(p_rtp, "doc", DIP_ALL + DIP_DIR, helptags_cb, &add_help_tags);
+    do_in_path(p_rtp, "", "doc", DIP_ALL + DIP_DIR, helptags_cb, &add_help_tags);
   } else {
     ExpandInit(&xpc);
     xpc.xp_context = EXPAND_DIRECTORIES;

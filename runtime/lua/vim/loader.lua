@@ -1,11 +1,12 @@
-local uv = vim.loop
+local uv = vim.uv
+local uri_encode = vim.uri_encode
 
 --- @type (fun(modename: string): fun()|string)[]
 local loaders = package.loaders
 
 local M = {}
 
----@alias CacheHash {mtime: {sec:number, nsec:number}, size:number, type: string}
+---@alias CacheHash {mtime: {nsec: integer, sec: integer}, size: integer, type?: uv.aliases.fs_stat_types}
 ---@alias CacheEntry {hash:CacheHash, chunk:string}
 
 ---@class ModuleFindOpts
@@ -17,23 +18,25 @@ local M = {}
 ---@class ModuleInfo
 ---@field modpath string Path of the module
 ---@field modname string Name of the module
----@field stat? uv_fs_t File stat of the module path
+---@field stat? uv.uv_fs_t File stat of the module path
 
 ---@alias LoaderStats table<string, {total:number, time:number, [string]:number?}?>
 
+---@nodoc
 M.path = vim.fn.stdpath('cache') .. '/luac'
+
+---@nodoc
 M.enabled = false
 
 ---@class Loader
 ---@field _rtp string[]
 ---@field _rtp_pure string[]
 ---@field _rtp_key string
+---@field _hashes? table<string, CacheHash>
 local Loader = {
-  VERSION = 3,
+  VERSION = 4,
   ---@type table<string, table<string,ModuleInfo>>
   _indexed = {},
-  ---@type table<string, CacheHash>
-  _hashes = {},
   ---@type table<string, string[]>
   _topmods = {},
   _loadfile = loadfile,
@@ -44,9 +47,13 @@ local Loader = {
 }
 
 --- @param path string
---- @return uv.fs_stat.result
+--- @return CacheHash
 --- @private
 function Loader.get_hash(path)
+  if not Loader._hashes then
+    return uv.fs_stat(path) --[[@as CacheHash]]
+  end
+
   if not Loader._hashes[path] then
     -- Note we must never save a stat for a non-existent path.
     -- For non-existent paths fs_stat() will return nil.
@@ -55,7 +62,6 @@ function Loader.get_hash(path)
   return Loader._hashes[path]
 end
 
----@private
 local function normalize(path)
   return vim.fs.normalize(path, { expand_env = false })
 end
@@ -94,7 +100,7 @@ end
 ---@return string file_name
 ---@private
 function Loader.cache_file(name)
-  local ret = M.path .. '/' .. name:gsub('[/\\:]', '%%')
+  local ret = ('%s/%s'):format(M.path, uri_encode(name, 'rfc2396'))
   return ret:sub(-4) == '.lua' and (ret .. 'c') or (ret .. '.luac')
 end
 
@@ -119,7 +125,6 @@ end
 --- @param path string
 --- @param mode integer
 --- @return string? data
---- @private
 local function readfile(path, mode)
   local f = uv.fs_open(path, 'r', mode)
   if f then
@@ -158,18 +163,21 @@ function Loader.read(name)
   end
 end
 
---- The `package.loaders` loader for lua files using the cache.
+--- The `package.loaders` loader for Lua files using the cache.
 ---@param modname string module name
 ---@return string|function
 ---@private
 function Loader.loader(modname)
+  Loader._hashes = {}
   local ret = M.find(modname)[1]
   if ret then
     -- Make sure to call the global loadfile so we respect any augmentations done elsewhere.
     -- E.g. profiling
     local chunk, err = loadfile(ret.modpath)
+    Loader._hashes = nil
     return chunk or error(err)
   end
+  Loader._hashes = nil
   return '\ncache_loader: module ' .. modname .. ' not found'
 end
 
@@ -205,7 +213,7 @@ end
 ---@private
 -- luacheck: ignore 312
 function Loader.loadfile(filename, mode, env)
-  -- ignore mode, since we byte-compile the lua source files
+  -- ignore mode, since we byte-compile the Lua source files
   mode = nil
   return Loader.load(normalize(filename), { mode = mode, env = env })
 end
@@ -262,7 +270,7 @@ function Loader.load(modpath, opts)
   return chunk, err
 end
 
---- Finds lua modules for the given module name.
+--- Finds Lua modules for the given module name.
 ---@param modname string Module name, or `"*"` to find the top-level modules instead
 ---@param opts? ModuleFindOpts (table|nil) Options for finding a module:
 ---    - rtp: (boolean) Search for modname in the runtime path (defaults to `true`)
@@ -283,7 +291,7 @@ function M.find(modname, opts)
   local idx = modname:find('.', 1, true)
 
   -- HACK: fix incorrect require statements. Really not a fan of keeping this,
-  -- but apparently the regular lua loader also allows this
+  -- but apparently the regular Lua loader also allows this
   if idx == 1 then
     modname = modname:gsub('^%.+', '')
     basename = modname:gsub('%.', '/')
@@ -304,7 +312,6 @@ function M.find(modname, opts)
   local results = {}
 
   -- Only continue if we haven't found anything yet or we want to find all
-  ---@private
   local function continue()
     return #results == 0 or opts.all
   end
@@ -312,7 +319,6 @@ function M.find(modname, opts)
   -- Checks if the given paths contain the top-level module.
   -- If so, it tries to find the module path for the given module name.
   ---@param paths string[]
-  ---@private
   local function _find(paths)
     for _, path in ipairs(paths) do
       if topmod == '*' then
@@ -373,14 +379,16 @@ function M.reset(path)
   end
 
   -- Path could be a directory so just clear all the hashes.
-  Loader._hashes = {}
+  if Loader._hashes then
+    Loader._hashes = {}
+  end
 end
 
 --- Enables the experimental Lua module loader:
 --- * overrides loadfile
---- * adds the lua loader using the byte-compilation cache
+--- * adds the Lua loader using the byte-compilation cache
 --- * adds the libs loader
---- * removes the default Neovim loader
+--- * removes the default Nvim loader
 function M.enable()
   if M.enabled then
     return
@@ -388,11 +396,11 @@ function M.enable()
   M.enabled = true
   vim.fn.mkdir(vim.fn.fnamemodify(M.path, ':p'), 'p')
   _G.loadfile = Loader.loadfile
-  -- add lua loader
+  -- add Lua loader
   table.insert(loaders, 2, Loader.loader)
   -- add libs loader
   table.insert(loaders, 3, Loader.loader_lib)
-  -- remove Neovim loader
+  -- remove Nvim loader
   for l, loader in ipairs(loaders) do
     if loader == vim._load_package then
       table.remove(loaders, l)
@@ -403,7 +411,7 @@ end
 
 --- Disables the experimental Lua module loader:
 --- * removes the loaders
---- * adds the default Neovim loader
+--- * adds the default Nvim loader
 function M.disable()
   if not M.enabled then
     return
@@ -418,8 +426,8 @@ function M.disable()
   table.insert(loaders, 2, vim._load_package)
 end
 
---- Return the top-level `/lua/*` modules for this path
----@param path string path to check for top-level lua modules
+--- Return the top-level \`/lua/*` modules for this path
+---@param path string path to check for top-level Lua modules
 ---@private
 function Loader.lsmod(path)
   if not Loader._indexed[path] then
@@ -441,7 +449,7 @@ function Loader.lsmod(path)
       if topname then
         Loader._indexed[path][topname] = { modpath = modpath, modname = topname }
         Loader._topmods[topname] = Loader._topmods[topname] or {}
-        if not vim.tbl_contains(Loader._topmods[topname], path) then
+        if not vim.list_contains(Loader._topmods[topname], path) then
           table.insert(Loader._topmods[topname], path)
         end
       end
@@ -457,7 +465,7 @@ end
 --- @private
 function Loader.track(stat, f)
   return function(...)
-    local start = vim.loop.hrtime()
+    local start = vim.uv.hrtime()
     local r = { f(...) }
     Loader._stats[stat] = Loader._stats[stat] or { total = 0, time = 0 }
     Loader._stats[stat].total = Loader._stats[stat].total + 1
@@ -496,7 +504,6 @@ end
 ---@private
 function M._inspect(opts)
   if opts and opts.print then
-    ---@private
     local function ms(nsec)
       return math.floor(nsec / 1e6 * 1000 + 0.5) / 1000 .. 'ms'
     end
@@ -515,7 +522,7 @@ function M._inspect(opts)
         { ms(Loader._stats[stat].time / Loader._stats[stat].total) .. '\n', 'Bold' },
       })
       for k, v in pairs(Loader._stats[stat]) do
-        if not vim.tbl_contains({ 'time', 'total' }, k) then
+        if not vim.list_contains({ 'time', 'total' }, k) then
           chunks[#chunks + 1] = { '* ' .. k .. ':' .. string.rep(' ', 9 - #k) }
           chunks[#chunks + 1] = { tostring(v) .. '\n', 'Number' }
         end

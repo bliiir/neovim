@@ -52,11 +52,11 @@ describe('search highlighting', function()
       {1:~                                       }|
       /text^                                   |
     ]], win_viewport={
-      [2] = {win = {id = 1000}, topline = 0, botline = 3, curline = 0, curcol = 9, linecount = 2, sum_scroll_delta = 0};
+      [2] = {win = {id = 1000}, topline = 0, botline = 3, curline = 0, curcol = 8, linecount = 2, sum_scroll_delta = 0};
     }}
   end)
 
-  it('works', function()
+  local function test_search_hl()
     insert([[
       some text
       more textstuff
@@ -109,6 +109,26 @@ describe('search highlighting', function()
       {1:~                                       }|
       :nohlsearch                             |
     ]])
+  end
+
+  it("works when 'winhighlight' is not set", function()
+    test_search_hl()
+  end)
+
+  it("works when 'winhighlight' doesn't change Search highlight", function()
+    command('setlocal winhl=NonText:Underlined')
+    local attrs = screen:get_default_attr_ids()
+    attrs[1] = {foreground = Screen.colors.SlateBlue, underline = true}
+    screen:set_default_attr_ids(attrs)
+    test_search_hl()
+  end)
+
+  it("works when 'winhighlight' changes Search highlight", function()
+    command('setlocal winhl=Search:Underlined')
+    local attrs = screen:get_default_attr_ids()
+    attrs[2] = {foreground = Screen.colors.SlateBlue, underline = true}
+    screen:set_default_attr_ids(attrs)
+    test_search_hl()
   end)
 
   describe('CurSearch highlight', function()
@@ -512,6 +532,36 @@ describe('search highlighting', function()
       {1:~                   }│{1:~                  }|
       /file^                                   |
     ]])
+    feed('<Esc>')
+
+    command('set rtp^=test/functional/fixtures')
+    -- incsearch works after c_CTRL-R inserts clipboard register
+
+    command('let @* = "first"')
+    feed('/<C-R>*')
+    screen:expect([[
+      the {3:first} line      │the {2:first} line     |
+      in a little file    │in a little file   |
+      {1:~                   }│{1:~                  }|
+      {1:~                   }│{1:~                  }|
+      {1:~                   }│{1:~                  }|
+      {1:~                   }│{1:~                  }|
+      /first^                                  |
+    ]])
+    feed('<Esc>')
+
+    command('let @+ = "little"')
+    feed('/<C-R>+')
+    screen:expect([[
+      the first line      │the first line     |
+      in a {3:little} file    │in a {2:little} file   |
+      {1:~                   }│{1:~                  }|
+      {1:~                   }│{1:~                  }|
+      {1:~                   }│{1:~                  }|
+      {1:~                   }│{1:~                  }|
+      /little^                                 |
+    ]])
+    feed('<Esc>')
   end)
 
   it('works with incsearch and offset', function()

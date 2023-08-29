@@ -143,9 +143,8 @@ bool ctx_restore(Context *ctx, const int flags)
     free_ctx = true;
   }
 
-  char *op_shada;
-  get_option_value("shada", NULL, &op_shada, NULL, OPT_GLOBAL);
-  set_option_value("shada", 0L, "!,'100,%", OPT_GLOBAL);
+  OptVal op_shada = get_option_value("shada", NULL, OPT_GLOBAL, NULL);
+  set_option_value("shada", STATIC_CSTR_AS_OPTVAL("!,'100,%"), OPT_GLOBAL);
 
   if (flags & kCtxRegs) {
     ctx_restore_regs(ctx);
@@ -171,8 +170,8 @@ bool ctx_restore(Context *ctx, const int flags)
     ctx_free(ctx);
   }
 
-  set_option_value("shada", 0L, op_shada, OPT_GLOBAL);
-  xfree(op_shada);
+  set_option_value("shada", op_shada, OPT_GLOBAL);
+  optval_free(op_shada);
 
   return true;
 }
@@ -272,8 +271,7 @@ static inline void ctx_save_funcs(Context *ctx, bool scriptonly)
       size_t cmd_len = sizeof("func! ") + strlen(name);
       char *cmd = xmalloc(cmd_len);
       snprintf(cmd, cmd_len, "func! %s", name);
-      Dict(exec_opts) opts = { 0 };
-      opts.output = BOOLEAN_OBJ(true);
+      Dict(exec_opts) opts = { .output = true };
       String func_body = exec_impl(VIML_INTERNAL_CALL, cstr_as_string(cmd),
                                    &opts, &err);
       xfree(cmd);

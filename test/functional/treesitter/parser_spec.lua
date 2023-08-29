@@ -1,6 +1,7 @@
 local helpers = require('test.functional.helpers')(after_each)
 
 local clear = helpers.clear
+local dedent = helpers.dedent
 local eq = helpers.eq
 local insert = helpers.insert
 local exec_lua = helpers.exec_lua
@@ -8,10 +9,13 @@ local pcall_err = helpers.pcall_err
 local feed = helpers.feed
 local is_os = helpers.is_os
 
-before_each(clear)
-
 describe('treesitter parser API', function()
-  clear()
+  before_each(function()
+    clear()
+    exec_lua[[
+      vim.g.__ts_debug = 1
+    ]]
+  end)
 
   it('parses buffer', function()
     insert([[
@@ -182,11 +186,11 @@ void ui_refresh(void)
     local function q(n)
       return exec_lua ([[
         local query, n = ...
-        local before = vim.loop.hrtime()
+        local before = vim.uv.hrtime()
         for i=1,n,1 do
           cquery = vim.treesitter.query.parse("c", ...)
         end
-        local after = vim.loop.hrtime()
+        local after = vim.uv.hrtime()
         return after - before
       ]], long_query, n)
     end
@@ -194,8 +198,8 @@ void ui_refresh(void)
     local firstrun = q(1)
     local manyruns = q(100)
 
-    -- First run should be at least 400x slower than an 100 subsequent runs.
-    local factor = is_os('win') and 200 or 400
+    -- First run should be at least 200x slower than an 100 subsequent runs.
+    local factor = is_os('win') and 100 or 200
     assert(factor * manyruns < firstrun, ('firstrun: %f ms, manyruns: %f ms'):format(firstrun / 1e6, manyruns / 1e6))
   end)
 
@@ -483,9 +487,8 @@ end]]
     return list
     ]]
 
-    eq({ 'any-of?', 'contains?', 'eq?', 'is-main?', 'lua-match?', 'match?', 'vim-match?' }, res_list)
+    eq({ 'any-of?', 'contains?', 'eq?', 'has-ancestor?', 'has-parent?', 'is-main?', 'lua-match?', 'match?', 'vim-match?' }, res_list)
   end)
-
 
   it('allows to set simple ranges', function()
     insert(test_text)
@@ -503,22 +506,12 @@ end]]
     local root = parser:parse()[1]:root()
     parser:set_included_regions({{root:child(0)}})
     parser:invalidate()
-    return { parser:parse()[1]:root():range() }
+    return { parser:parse(true)[1]:root():range() }
     ]]
 
     eq({0, 0, 18, 1}, res2)
 
-    local range = exec_lua [[
-      local res = {}
-      for _, region in ipairs(parser:included_regions()) do
-        for _, node in ipairs(region) do
-          table.insert(res, {node:range()})
-        end
-      end
-      return res
-    ]]
-
-    eq(range, { { 0, 0, 18, 1 } })
+    eq({ { { 0, 0, 0, 18, 1, 512 } } }, exec_lua [[ return parser:included_regions() ]])
 
     local range_tbl = exec_lua [[
       parser:set_included_regions { { { 0, 0, 17, 1 } } }
@@ -528,6 +521,7 @@ end]]
 
     eq(range_tbl, { { { 0, 0, 0, 17, 1, 508 } } })
   end)
+
   it("allows to set complex ranges", function()
     insert(test_text)
 
@@ -542,7 +536,7 @@ end]]
 
     parser:set_included_regions({nodes})
 
-    local root = parser:parse()[1]:root()
+    local root = parser:parse(true)[1]:root()
 
     local res = {}
     for i=0,(root:named_child_count() - 1) do
@@ -640,7 +634,8 @@ int x = INT_MAX;
         exec_lua([[
         parser = vim.treesitter.get_parser(0, "c", {
           injections = {
-            c = "(preproc_def (preproc_arg) @c) (preproc_function_def value: (preproc_arg) @c)"}})
+            c = '(preproc_def (preproc_arg) @injection.content (#set! injection.language "c")) (preproc_function_def value: (preproc_arg) @injection.content (#set! injection.language "c"))'}})
+        parser:parse(true)
         ]])
 
         eq("table", exec_lua("return type(parser:children().c)"))
@@ -672,7 +667,8 @@ int x = INT_MAX;
         exec_lua([[
         parser = vim.treesitter.get_parser(0, "c", {
           injections = {
-            c = "(preproc_def (preproc_arg) @c @combined) (preproc_function_def value: (preproc_arg) @c @combined)"}})
+            c = '(preproc_def (preproc_arg) @injection.content (#set! injection.language "c") (#set! injection.combined)) (preproc_function_def value: (preproc_arg) @injection.content (#set! injection.language "c") (#set! injection.combined))'}})
+        parser:parse(true)
         ]])
 
         eq("table", exec_lua("return type(parser:children().c)"))
@@ -700,57 +696,36 @@ int x = INT_MAX;
       end)
     end)
 
-    describe("when providing parsing information through a directive", function()
-      it("should inject a language", function()
-        exec_lua([=[
-        vim.treesitter.query.add_directive("inject-clang!", function(match, _, _, pred, metadata)
-          metadata.language = "c"
-          metadata.combined = true
-          metadata.content = pred[2]
-        end)
-
+    describe("when using injection.self", function()
+      it("should inject the source language", function()
+        exec_lua([[
         parser = vim.treesitter.get_parser(0, "c", {
           injections = {
-            c = "(preproc_def ((preproc_arg) @_c (#inject-clang! @_c)))" ..
-                "(preproc_function_def value: ((preproc_arg) @_a (#inject-clang! @_a)))"}})
-        ]=])
+            c = '(preproc_def (preproc_arg) @injection.content (#set! injection.self)) (preproc_function_def value: (preproc_arg) @injection.content (#set! injection.self))'}})
+        parser:parse(true)
+        ]])
 
         eq("table", exec_lua("return type(parser:children().c)"))
-        eq(2, exec_lua("return #parser:children().c:trees()"))
+        eq(5, exec_lua("return #parser:children().c:trees()"))
         eq({
           {0, 0, 7, 0},   -- root tree
-          {3, 14, 5, 18}, -- VALUE 123
-                          -- VALUE1 123
-                          -- VALUE2 123
-          {1, 26, 2, 66}  -- READ_STRING(x, y) (char *)read_string((x), (size_t)(y))
-                          -- READ_STRING_OK(x, y) (char *)read_string((x), (size_t)(y))
+          {3, 14, 3, 17}, -- VALUE 123
+          {4, 15, 4, 18}, -- VALUE1 123
+          {5, 15, 5, 18}, -- VALUE2 123
+          {1, 26, 1, 63}, -- READ_STRING(x, y) (char *)read_string((x), (size_t)(y))
+          {2, 29, 2, 66}  -- READ_STRING_OK(x, y) (char *)read_string((x), (size_t)(y))
         }, get_ranges())
 
         helpers.feed('ggo<esc>')
-        eq("table", exec_lua("return type(parser:children().c)"))
-        eq(2, exec_lua("return #parser:children().c:trees()"))
+        eq(5, exec_lua("return #parser:children().c:trees()"))
         eq({
           {0, 0, 8, 0},   -- root tree
-          {4, 14, 6, 18}, -- VALUE 123
-                          -- VALUE1 123
-                          -- VALUE2 123
-          {2, 26, 3, 66}  -- READ_STRING(x, y) (char *)read_string((x), (size_t)(y))
-                          -- READ_STRING_OK(x, y) (char *)read_string((x), (size_t)(y))
+          {4, 14, 4, 17}, -- VALUE 123
+          {5, 15, 5, 18}, -- VALUE1 123
+          {6, 15, 6, 18}, -- VALUE2 123
+          {2, 26, 2, 63}, -- READ_STRING(x, y) (char *)read_string((x), (size_t)(y))
+          {3, 29, 3, 66}  -- READ_STRING_OK(x, y) (char *)read_string((x), (size_t)(y))
         }, get_ranges())
-      end)
-
-      it("should not inject bad languages", function()
-        exec_lua([=[
-        vim.treesitter.query.add_directive("inject-bad!", function(match, _, _, pred, metadata)
-          metadata.language = "{"
-          metadata.combined = true
-          metadata.content = pred[2]
-        end)
-
-        parser = vim.treesitter.get_parser(0, "c", {
-          injections = {
-            c = "(preproc_function_def value: ((preproc_arg) @_a (#inject-bad! @_a)))"}})
-        ]=])
       end)
     end)
 
@@ -759,15 +734,16 @@ int x = INT_MAX;
         exec_lua([[
         parser = vim.treesitter.get_parser(0, "c", {
           injections = {
-            c = "(preproc_def ((preproc_arg) @c (#offset! @c 0 2 0 -1))) (preproc_function_def value: (preproc_arg) @c)"}})
+            c = '(preproc_def ((preproc_arg) @injection.content (#set! injection.language "c") (#offset! @injection.content 0 2 0 -1))) (preproc_function_def value: (preproc_arg) @injection.content (#set! injection.language "c"))'}})
+        parser:parse(true)
         ]])
 
         eq("table", exec_lua("return type(parser:children().c)"))
         eq({
           {0, 0, 7, 0},   -- root tree
-          {3, 15, 3, 16}, -- VALUE 123
-          {4, 16, 4, 17}, -- VALUE1 123
-          {5, 16, 5, 17}, -- VALUE2 123
+          {3, 16, 3, 16}, -- VALUE 123
+          {4, 17, 4, 17}, -- VALUE1 123
+          {5, 17, 5, 17}, -- VALUE2 123
           {1, 26, 1, 63}, -- READ_STRING(x, y) (char *)read_string((x), (size_t)(y))
           {2, 29, 2, 66}  -- READ_STRING_OK(x, y) (char *)read_string((x), (size_t)(y))
         }, get_ranges())
@@ -783,7 +759,7 @@ int x = INT_MAX;
         return list
         ]]
 
-        eq({ 'gsub!', 'offset!', 'set!' }, res_list)
+        eq({ 'gsub!', 'offset!', 'set!', 'trim!' }, res_list)
       end)
     end)
   end)
@@ -799,7 +775,8 @@ int x = INT_MAX;
     it("should return the correct language tree", function()
       local result = exec_lua([[
       parser = vim.treesitter.get_parser(0, "c", {
-        injections = { c = "(preproc_def (preproc_arg) @c)"}})
+        injections = { c = '(preproc_def (preproc_arg) @injection.content (#set! injection.language "c"))'}})
+      parser:parse(true)
 
       local sub_tree = parser:language_for_range({1, 18, 1, 19})
 
@@ -885,67 +862,197 @@ int x = INT_MAX;
     end)
   end)
 
-  it("can fold via foldexpr", function()
-    insert(test_text)
+  it('tracks the root range properly (#22911)', function()
+    insert([[
+      int main() {
+        int x = 3;
+      }]])
 
-    local function get_fold_levels()
+    local query0 = [[
+      (declaration) @declaration
+      (function_definition) @function
+    ]]
+
+    exec_lua([[
+      vim.treesitter.start(0, 'c')
+    ]])
+
+    local function run_query()
       return exec_lua([[
-        local res = {}
-        for i = 1, vim.api.nvim_buf_line_count(0) do
-          res[i] = vim.treesitter.foldexpr(i)
-        end
-        return res
-      ]])
+      local query = vim.treesitter.query.parse("c", ...)
+      parser = vim.treesitter.get_parser()
+      tree = parser:parse()[1]
+      res = {}
+      for id, node in query:iter_captures(tree:root()) do
+        table.insert(res, {query.captures[id], node:range()})
+      end
+      return res
+      ]], query0)
     end
 
-    exec_lua([[vim.treesitter.get_parser(0, "c")]])
+    eq({
+      { 'function', 0, 0, 2, 1 },
+      { 'declaration', 1, 2, 1, 12 }
+    }, run_query())
+
+    helpers.command'normal ggO'
+    insert('int a;')
 
     eq({
-      [1] = '>1',
-      [2] = '1',
-      [3] = '1',
-      [4] = '1',
-      [5] = '>2',
-      [6] = '2',
-      [7] = '2',
-      [8] = '1',
-      [9] = '1',
-      [10] = '>2',
-      [11] = '2',
-      [12] = '2',
-      [13] = '2',
-      [14] = '2',
-      [15] = '>3',
-      [16] = '3',
-      [17] = '3',
-      [18] = '2',
-      [19] = '1' }, get_fold_levels())
+      { 'declaration', 0, 0, 0, 6 },
+      { 'function', 1, 0, 3, 1 },
+      { 'declaration', 2, 2, 2, 12 }
+    }, run_query())
 
-    helpers.command('1,2d')
-    helpers.poke_eventloop()
-
-    exec_lua([[vim.treesitter.get_parser():parse()]])
-
-    helpers.poke_eventloop()
-    helpers.sleep(100)
-
-    eq({
-      [1] = '0',
-      [2] = '0',
-      [3] = '>1',
-      [4] = '1',
-      [5] = '1',
-      [6] = '0',
-      [7] = '0',
-      [8] = '>1',
-      [9] = '1',
-      [10] = '1',
-      [11] = '1',
-      [12] = '1',
-      [13] = '>2',
-      [14] = '2',
-      [15] = '2',
-      [16] = '1',
-      [17] = '0' }, get_fold_levels())
   end)
+
+  it('handles ranges when source is a multiline string (#20419)', function()
+    local source = [==[
+      vim.cmd[[
+        set number
+        set cmdheight=2
+        set lastsatus=2
+      ]]
+
+      set query = [[;; query
+        ((function_call
+          name: [
+            (identifier) @_cdef_identifier
+            (_ _ (identifier) @_cdef_identifier)
+          ]
+          arguments: (arguments (string content: _ @injection.content)))
+          (#set! injection.language "c")
+          (#eq? @_cdef_identifier "cdef"))
+      ]]
+    ]==]
+
+    local r = exec_lua([[
+      local parser = vim.treesitter.get_string_parser(..., 'lua')
+      parser:parse(true)
+      local ranges = {}
+      parser:for_each_tree(function(tstree, tree)
+        ranges[tree:lang()] = { tstree:root():range(true) }
+      end)
+      return ranges
+    ]], source)
+
+    eq({
+      lua = { 0, 6, 6, 16, 4, 438 },
+      query = { 6, 20, 113, 15, 6, 431 },
+      vim = { 1, 0, 16, 4, 6, 89 }
+    }, r)
+
+    -- The above ranges are provided directly from treesitter, however query directives may mutate
+    -- the ranges but only provide a Range4. Strip the byte entries from the ranges and make sure
+    -- add_bytes() produces the same result.
+
+    local rb = exec_lua([[
+      local r, source = ...
+      local add_bytes = require('vim.treesitter._range').add_bytes
+      for lang, range in pairs(r) do
+        r[lang] = {range[1], range[2], range[4], range[5]}
+        r[lang] = add_bytes(source, r[lang])
+      end
+      return r
+    ]], r, source)
+
+    eq(rb, r)
+
+  end)
+
+  it("does not produce empty injection ranges (#23409)", function()
+    insert [[
+      Examples: >lua
+        local a = {}
+<
+    ]]
+
+    -- This is not a valid injection since (code) has children and include-children is not set
+    exec_lua [[
+      parser1 = require('vim.treesitter.languagetree').new(0, "vimdoc", {
+        injections = {
+          vimdoc = "((codeblock (language) @injection.language (code) @injection.content))"
+        }
+      })
+      parser1:parse(true)
+    ]]
+
+    eq(0, exec_lua("return #vim.tbl_keys(parser1:children())"))
+
+    exec_lua [[
+      parser2 = require('vim.treesitter.languagetree').new(0, "vimdoc", {
+        injections = {
+          vimdoc = "((codeblock (language) @injection.language (code) @injection.content) (#set! injection.include-children))"
+        }
+      })
+      parser2:parse(true)
+    ]]
+
+    eq(1, exec_lua("return #vim.tbl_keys(parser2:children())"))
+    eq( { { { 1, 0, 21, 2, 0, 42 } } }, exec_lua("return parser2:children().lua:included_regions()"))
+
+  end)
+
+  it("parsers injections incrementally", function()
+    insert(dedent[[
+      >lua
+        local a = {}
+      <
+
+      >lua
+        local b = {}
+      <
+
+      >lua
+        local c = {}
+      <
+
+      >lua
+        local d = {}
+      <
+
+      >lua
+        local e = {}
+      <
+
+      >lua
+        local f = {}
+      <
+
+      >lua
+        local g = {}
+      <
+    ]])
+
+    exec_lua [[
+      parser = require('vim.treesitter.languagetree').new(0, "vimdoc", {
+        injections = {
+          vimdoc = "((codeblock (language) @injection.language (code) @injection.content) (#set! injection.include-children))"
+        }
+      })
+    ]]
+
+    --- Do not parse injections by default
+    eq(0, exec_lua [[
+      parser:parse()
+      return #vim.tbl_keys(parser:children())
+    ]])
+
+    --- Only parse injections between lines 0, 2
+    eq(1, exec_lua [[
+      parser:parse({0, 2})
+      return #parser:children().lua:trees()
+    ]])
+
+    eq(2, exec_lua [[
+      parser:parse({2, 6})
+      return #parser:children().lua:trees()
+    ]])
+
+    eq(7, exec_lua [[
+      parser:parse(true)
+      return #parser:children().lua:trees()
+    ]])
+  end)
+
 end)

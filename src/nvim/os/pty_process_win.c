@@ -6,7 +6,8 @@
 #include <stdlib.h>
 
 #include "nvim/ascii.h"
-#include "nvim/mbyte.h"  // for utf8_to_utf16, utf16_to_utf8
+#include "nvim/eval/typval.h"
+#include "nvim/mbyte.h"
 #include "nvim/memory.h"
 #include "nvim/os/os.h"
 #include "nvim/os/pty_conpty_win.h"
@@ -172,11 +173,13 @@ void pty_process_close(PtyProcess *ptyproc)
 
 void pty_process_close_master(PtyProcess *ptyproc)
   FUNC_ATTR_NONNULL_ALL
-{}
+{
+}
 
 void pty_process_teardown(Loop *loop)
   FUNC_ATTR_NONNULL_ALL
-{}
+{
+}
 
 static void pty_process_connect_cb(uv_connect_t *req, int status)
   FUNC_ATTR_NONNULL_ALL

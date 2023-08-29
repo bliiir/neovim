@@ -405,10 +405,10 @@ func Test_getsettagstack()
   " Error cases
   call assert_equal({}, gettagstack(100))
   call assert_equal(-1, settagstack(100, {'items' : []}))
-  call assert_fails('call settagstack(1, [1, 10])', 'E715')
-  call assert_fails("call settagstack(1, {'items' : 10})", 'E714')
-  call assert_fails("call settagstack(1, {'items' : []}, 10)", 'E928')
-  call assert_fails("call settagstack(1, {'items' : []}, 'b')", 'E962')
+  call assert_fails('call settagstack(1, [1, 10])', 'E1206:')
+  call assert_fails("call settagstack(1, {'items' : 10})", 'E714:')
+  call assert_fails("call settagstack(1, {'items' : []}, 10)", 'E1174:')
+  call assert_fails("call settagstack(1, {'items' : []}, 'b')", 'E962:')
   call assert_equal(-1, settagstack(0, v:_null_dict))
 
   set tags=Xtags
@@ -671,7 +671,7 @@ func Test_tselect()
   call writefile(lines, 'XTest_tselect')
   let buf = RunVimInTerminal('-S XTest_tselect', {'rows': 10, 'cols': 50})
 
-  call term_wait(buf, 100)
+  call TermWait(buf, 50)
   call term_sendkeys(buf, ":tselect main\<CR>2\<CR>")
   call VerifyScreenDump(buf, 'Test_tselect_1', {})
 

@@ -122,23 +122,23 @@ else
 endif
 # Build oldtest by specifying the relative .vim filename.
 .PHONY: phony_force
-test/old/testdir/%.vim: phony_force
+test/old/testdir/%.vim: phony_force nvim
 	+$(SINGLE_MAKE) -C test/old/testdir NVIM_PRG=$(NVIM_PRG) SCRIPTS= $(MAKEOVERRIDES) $(patsubst test/old/testdir/%.vim,%,$@)
 
 functionaltest-lua: | nvim
-	$(BUILD_TOOL) -C build $@
+	$(BUILD_TOOL) -C build functionaltest
 
 FORMAT=formatc formatlua format
 LINT=lintlua lintsh lintc clang-tidy lintcommit lint
 TEST=functionaltest unittest
-generated-sources benchmark uninstall $(FORMAT) $(LINT) $(TEST): | build/.ran-cmake
+generated-sources benchmark $(FORMAT) $(LINT) $(TEST) doc: | build/.ran-cmake
 	$(CMAKE_PRG) --build build --target $@
 
 test: $(TEST)
 
 iwyu: build/.ran-cmake
 	cmake --preset iwyu
-	cmake --build --preset iwyu > build/iwyu.log
+	cmake --build build > build/iwyu.log
 	iwyu-fix-includes --only_re="src/nvim" --ignore_re="src/nvim/(auto|map.h|eval/encode.c)" --safe_headers < build/iwyu.log
 	cmake -B build -U ENABLE_IWYU
 
@@ -173,4 +173,4 @@ $(DEPS_BUILD_DIR)/%: phony_force
 	$(BUILD_TOOL) -C $(DEPS_BUILD_DIR) $(patsubst $(DEPS_BUILD_DIR)/%,%,$@)
 endif
 
-.PHONY: test clean distclean nvim libnvim cmake deps install appimage checkprefix benchmark uninstall $(FORMAT) $(LINT) $(TEST)
+.PHONY: test clean distclean nvim libnvim cmake deps install appimage checkprefix benchmark $(FORMAT) $(LINT) $(TEST)

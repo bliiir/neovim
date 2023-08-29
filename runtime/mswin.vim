@@ -1,7 +1,8 @@
 " Set options and add mapping such that Vim behaves a lot like MS-Windows
 "
-" Maintainer:	Bram Moolenaar <Bram@vim.org>
-" Last Change:	2018 Dec 07
+" Maintainer:	The Vim Project <https://github.com/vim/vim>
+" Last Change:	2023 Aug 10
+" Former Maintainer:	Bram Moolenaar <Bram@vim.org>
 
 " Bail out if this isn't wanted.
 if exists("g:skip_loading_mswin") && g:skip_loading_mswin
@@ -15,7 +16,10 @@ endif
 set cpo&vim
 
 " set 'selection', 'selectmode', 'mousemodel' and 'keymodel' for MS-Windows
-behave mswin
+set selection=exclusive
+set selectmode=mouse,key
+set mousemodel=popup
+set keymodel=startsel,stopsel
 
 " backspace and cursor keys wrap to previous/next line
 set backspace=indent,eol,start whichwrap+=<,>,[,]

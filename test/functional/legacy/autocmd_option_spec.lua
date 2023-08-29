@@ -542,13 +542,6 @@ describe('au OptionSet', function()
       expected_combination({'cursorcolumn', 0, 0, 0, 1, 'global', 'set'})
     end)
 
-    it('with option value converted internally', function()
-      command('noa set backspace=1')
-      command('set backspace=2')
-      expected_combination(({
-        'backspace', 'indent,eol', 'indent,eol', 'indent,eol', '2', 'global', 'set'
-      }))
-    end)
   end)
 
   describe('with specific option', function()
@@ -631,24 +624,24 @@ describe('au OptionSet', function()
       it('should trigger if a boolean option be set globally', function()
         set_hook('autochdir')
 
-        nvim.set_option('autochdir', true)
-        eq(true, nvim.get_option('autochdir'))
+        nvim.set_option_value('autochdir', true, {scope='global'})
+        eq(true, nvim.get_option_value('autochdir', {scope='global'}))
         expected_combination({'autochdir', 0, '', 0, 1, 'global', 'setglobal'})
       end)
 
       it('should trigger if a number option be set globally', function()
         set_hook('cmdheight')
 
-        nvim.set_option('cmdheight', 5)
-        eq(5, nvim.get_option('cmdheight'))
+        nvim.set_option_value('cmdheight', 5, {scope='global'})
+        eq(5, nvim.get_option_value('cmdheight', {scope='global'}))
         expected_combination({'cmdheight', 1, '', 1, 5, 'global', 'setglobal'})
       end)
 
       it('should trigger if a string option be set globally', function()
         set_hook('ambiwidth')
 
-        nvim.set_option('ambiwidth', 'double')
-        eq('double', nvim.get_option('ambiwidth'))
+        nvim.set_option_value('ambiwidth', 'double', {scope='global'})
+        eq('double', nvim.get_option_value('ambiwidth', {scope='global'}))
         expected_combination({'ambiwidth', 'single', '', 'single', 'double', 'global', 'setglobal'})
       end)
     end)

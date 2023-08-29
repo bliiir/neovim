@@ -80,7 +80,7 @@ static const int included_patches[] = {
   2406,
   2405,
   2404,
-  // 2403,
+  2403,
   2402,
   2401,
   2400,
@@ -335,7 +335,7 @@ static const int included_patches[] = {
   2151,
   2150,
   2149,
-  // 2148,
+  2148,
   2147,
   // 2146,
   2145,
@@ -384,12 +384,12 @@ static const int included_patches[] = {
   2102,
   2101,
   2100,
-  // 2099,
+  2099,
   2098,
   2097,
   2096,
   2095,
-  // 2094,
+  2094,
   // 2093,
   // 2092,
   2091,
@@ -413,15 +413,15 @@ static const int included_patches[] = {
   2073,
   2072,
   // 2071,
-  // 2070,
-  // 2069,
-  // 2068,
-  // 2067,
-  // 2066,
+  2070,
+  2069,
+  2068,
+  2067,
+  2066,
   2065,
   2064,
   2063,
-  // 2062,
+  2062,
   2061,
   2060,
   2059,
@@ -430,16 +430,16 @@ static const int included_patches[] = {
   2056,
   2055,
   2054,
-  // 2053,
+  2053,
   2052,
   2051,
   2050,
   2049,
-  // 2048,
-  // 2047,
-  // 2046,
+  2048,
+  2047,
+  2046,
   2045,
-  // 2044,
+  2044,
   2043,
   2042,
   2041,
@@ -656,7 +656,7 @@ static const int included_patches[] = {
   1830,
   1829,
   1828,
-  // 1827,
+  1827,
   1826,
   1825,
   1824,
@@ -2560,6 +2560,11 @@ Dictionary version_dict(void)
   PUT(d, "major", INTEGER_OBJ(NVIM_VERSION_MAJOR));
   PUT(d, "minor", INTEGER_OBJ(NVIM_VERSION_MINOR));
   PUT(d, "patch", INTEGER_OBJ(NVIM_VERSION_PATCH));
+#ifndef NVIM_VERSION_BUILD
+  PUT(d, "build", NIL);
+#else
+  PUT(d, "build", CSTR_AS_OBJ(NVIM_VERSION_BUILD));
+#endif
   PUT(d, "prerelease", BOOLEAN_OBJ(NVIM_VERSION_PRERELEASE[0] != '\0'));
   PUT(d, "api_level", INTEGER_OBJ(NVIM_API_LEVEL));
   PUT(d, "api_compatible", INTEGER_OBJ(NVIM_API_LEVEL_COMPAT));
@@ -2695,33 +2700,39 @@ void list_version(void)
   msg(longVersion);
   msg(version_buildtype);
   list_lua_version();
-#ifndef NDEBUG
-  msg(version_cflags);
-#endif
 
-  version_msg("\n\n");
+  if (p_verbose > 0) {
+#ifndef NDEBUG
+    msg(version_cflags);
+#endif
+    version_msg("\n\n");
 
 #ifdef SYS_VIMRC_FILE
-  version_msg(_("   system vimrc file: \""));
-  version_msg(SYS_VIMRC_FILE);
-  version_msg("\"\n");
-#endif  // ifdef SYS_VIMRC_FILE
+    version_msg(_("   system vimrc file: \""));
+    version_msg(SYS_VIMRC_FILE);
+    version_msg("\"\n");
+#endif
+
 #ifdef HAVE_PATHDEF
+    if (*default_vim_dir != NUL) {
+      version_msg(_("  fall-back for $VIM: \""));
+      version_msg(default_vim_dir);
+      version_msg("\"\n");
+    }
 
-  if (*default_vim_dir != NUL) {
-    version_msg(_("  fall-back for $VIM: \""));
-    version_msg(default_vim_dir);
-    version_msg("\"\n");
+    if (*default_vimruntime_dir != NUL) {
+      version_msg(_(" f-b for $VIMRUNTIME: \""));
+      version_msg(default_vimruntime_dir);
+      version_msg("\"\n");
+    }
+#endif
   }
 
-  if (*default_vimruntime_dir != NUL) {
-    version_msg(_(" f-b for $VIMRUNTIME: \""));
-    version_msg(default_vimruntime_dir);
-    version_msg("\"\n");
-  }
-#endif  // ifdef HAVE_PATHDEF
-
-  version_msg("\nRun :checkhealth for more info");
+  version_msg(p_verbose > 0
+              ? "\nRun :checkhealth for more info"
+              : (starting
+                 ? "\nRun \"nvim -V1 -v\" for more info"
+                 : "\nRun \":verbose version\" for more info"));
 }
 
 /// Show the intro message when not editing a file.

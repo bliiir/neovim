@@ -29,6 +29,7 @@
 #include "nvim/edit.h"
 #include "nvim/eval.h"
 #include "nvim/eval/typval.h"
+#include "nvim/eval/vars.h"
 #include "nvim/ex_cmds.h"
 #include "nvim/ex_cmds_defs.h"
 #include "nvim/ex_docmd.h"
@@ -81,6 +82,7 @@ static unsigned last_prompt_id = 0;
 typedef struct {
   colnr_T vs_curswant;
   colnr_T vs_leftcol;
+  colnr_T vs_skipcol;
   linenr_T vs_topline;
   int vs_topfill;
   linenr_T vs_botline;
@@ -103,7 +105,7 @@ typedef struct {
 typedef struct command_line_state {
   VimState state;
   int firstc;
-  long count;
+  int count;
   int indent;
   int c;
   int gotesc;                           // true when <ESC> just typed
@@ -126,7 +128,32 @@ typedef struct command_line_state {
   int break_ctrl_c;
   expand_T xpc;
   long *b_im_ptr;
+  buf_T *b_im_ptr_buf;  ///< buffer where b_im_ptr is valid
 } CommandLineState;
+
+typedef struct cmdpreview_undo_info {
+  u_header_T *save_b_u_oldhead;
+  u_header_T *save_b_u_newhead;
+  u_header_T *save_b_u_curhead;
+  int save_b_u_numhead;
+  bool save_b_u_synced;
+  long save_b_u_seq_last;
+  long save_b_u_save_nr_last;
+  long save_b_u_seq_cur;
+  time_t save_b_u_time_cur;
+  long save_b_u_save_nr_cur;
+  char *save_b_u_line_ptr;
+  linenr_T save_b_u_line_lnum;
+  colnr_T save_b_u_line_colnr;
+} CpUndoInfo;
+
+typedef struct cmdpreview_buf_info {
+  buf_T *buf;
+  long save_b_p_ul;
+  int save_b_changed;
+  varnumber_T save_changedtick;
+  CpUndoInfo undo_info;
+} CpBufInfo;
 
 typedef struct cmdpreview_win_info {
   win_T *win;
@@ -135,17 +162,6 @@ typedef struct cmdpreview_win_info {
   int save_w_p_cul;
   int save_w_p_cuc;
 } CpWinInfo;
-
-typedef struct cmdpreview_buf_info {
-  buf_T *buf;
-  bool save_b_u_synced;
-  time_t save_b_u_time_cur;
-  long save_b_u_seq_cur;
-  u_header_T *save_b_u_newhead;
-  long save_b_p_ul;
-  int save_b_changed;
-  varnumber_T save_changedtick;
-} CpBufInfo;
 
 typedef struct cmdpreview_info {
   kvec_t(CpWinInfo) win_info;
@@ -193,6 +209,7 @@ static void save_viewstate(win_T *wp, viewstate_T *vs)
 {
   vs->vs_curswant = wp->w_curswant;
   vs->vs_leftcol = wp->w_leftcol;
+  vs->vs_skipcol = wp->w_skipcol;
   vs->vs_topline = wp->w_topline;
   vs->vs_topfill = wp->w_topfill;
   vs->vs_botline = wp->w_botline;
@@ -204,6 +221,7 @@ static void restore_viewstate(win_T *wp, viewstate_T *vs)
 {
   wp->w_curswant = vs->vs_curswant;
   wp->w_leftcol = vs->vs_leftcol;
+  wp->w_skipcol = vs->vs_skipcol;
   wp->w_topline = vs->vs_topline;
   wp->w_topfill = vs->vs_topfill;
   wp->w_botline = vs->vs_botline;
@@ -234,7 +252,7 @@ static bool do_incsearch_highlighting(int firstc, int *search_delim, incsearch_s
   bool delim_optional = false;
   int delim;
   char *end;
-  char *dummy;
+  const char *dummy;
   pos_T save_cursor;
   bool use_last_pat;
   bool retval = false;
@@ -295,7 +313,7 @@ static bool do_incsearch_highlighting(int firstc, int *search_delim, incsearch_s
     if (*p == '!') {
       p = skipwhite(p + 1);
     }
-    while (ASCII_ISALPHA(*(p = skipwhite((char *)p)))) {
+    while (ASCII_ISALPHA(*(p = skipwhite(p)))) {
       p++;
     }
     if (*p == NUL) {
@@ -372,7 +390,7 @@ theend:
 }
 
 // May do 'incsearch' highlighting if desired.
-static void may_do_incsearch_highlighting(int firstc, long count, incsearch_state_T *s)
+static void may_do_incsearch_highlighting(int firstc, int count, incsearch_state_T *s)
 {
   pos_T end_pos;
   proftime_T tm;
@@ -474,7 +492,7 @@ static void may_do_incsearch_highlighting(int firstc, long count, incsearch_stat
   // first restore the old curwin values, so the screen is
   // positioned in the same way as the actual search command
   restore_viewstate(curwin, &s->old_viewstate);
-  changed_cline_bef_curs();
+  changed_cline_bef_curs(curwin);
   update_topline(curwin);
 
   if (found != 0) {
@@ -503,6 +521,7 @@ static void may_do_incsearch_highlighting(int firstc, long count, incsearch_stat
   }
 
   validate_cursor();
+
   // May redraw the status line to show the cursor position.
   if (p_ru && (curwin->w_status_height > 0 || global_stl_height() > 0)) {
     curwin->w_redr_status = true;
@@ -597,6 +616,7 @@ static void finish_incsearch_highlighting(int gotesc, incsearch_state_T *s, bool
   magic_overruled = s->magic_overruled_save;
 
   validate_cursor();          // needed for TAB
+  status_redraw_all();
   redraw_all_later(UPD_SOME_VALID);
   if (call_update_screen) {
     update_screen();
@@ -638,7 +658,7 @@ static void init_ccline(int firstc, int indent)
 /// @param count  only used for incremental search
 /// @param indent  indent for inside conditionals
 /// @param clear_ccline  clear ccline first
-static uint8_t *command_line_enter(int firstc, long count, int indent, bool clear_ccline)
+static uint8_t *command_line_enter(int firstc, int count, int indent, bool clear_ccline)
 {
   // can be invoked recursively, identify each level
   static int cmdline_level = 0;
@@ -733,7 +753,7 @@ static uint8_t *command_line_enter(int firstc, long count, int indent, bool clea
     } else {
       s->b_im_ptr = &curbuf->b_p_imsearch;
     }
-
+    s->b_im_ptr_buf = curbuf;
     if (*s->b_im_ptr == B_IMODE_LMAP) {
       State |= MODE_LANGMAP;
     }
@@ -787,7 +807,7 @@ static uint8_t *command_line_enter(int firstc, long count, int indent, bool clea
 
   // Redraw the statusline in case it uses the current mode using the mode()
   // function.
-  if (!cmd_silent) {
+  if (!cmd_silent && !exmode_active) {
     bool found_one = false;
 
     FOR_ALL_WINDOWS_IN_TAB(wp, curtab) {
@@ -923,6 +943,8 @@ theend:
 
 static int command_line_check(VimState *state)
 {
+  CommandLineState *s = (CommandLineState *)state;
+
   redir_off = true;        // Don't redirect the typed command.
   // Repeated, because a ":redir" inside
   // completion may switch it on.
@@ -931,6 +953,9 @@ static int command_line_check(VimState *state)
   did_emsg = false;        // There can't really be a reason why an error
                            // that occurs while typing a command should
                            // cause the command not to be executed.
+
+  // Trigger SafeState if nothing is pending.
+  may_trigger_safestate(s->xpc.xp_numfiles <= 0);
 
   cursorcmd();             // set the cursor on the right spot
   ui_cursor_shape();
@@ -1137,7 +1162,7 @@ static int command_line_execute(VimState *state, int key)
     } else if (s->c == K_COMMAND) {
       do_cmdline(NULL, getcmdkeycmd, NULL, DOCMD_NOWAIT);
     } else {
-      map_execute_lua();
+      map_execute_lua(false);
     }
 
     // nvim_select_popupmenu_item() can be called from the handling of
@@ -1342,7 +1367,7 @@ static int command_line_execute(VimState *state, int key)
 // May adjust 'incsearch' highlighting for typing CTRL-G and CTRL-T, go to next
 // or previous match.
 // Returns FAIL when calling command_line_not_changed.
-static int may_do_command_line_next_incsearch(int firstc, long count, incsearch_state_T *s,
+static int may_do_command_line_next_incsearch(int firstc, int count, incsearch_state_T *s,
                                               bool next_match)
   FUNC_ATTR_NONNULL_ALL
 {
@@ -1435,7 +1460,7 @@ static int may_do_command_line_next_incsearch(int firstc, long count, incsearch_
 
     set_search_match(&s->match_end);
     curwin->w_cursor = s->match_start;
-    changed_cline_bef_curs();
+    changed_cline_bef_curs(curwin);
     update_topline(curwin);
     validate_cursor();
     highlight_match = true;
@@ -1535,20 +1560,21 @@ static int command_line_erase_chars(CommandLineState *s)
 /// language :lmap mappings and/or Input Method.
 static void command_line_toggle_langmap(CommandLineState *s)
 {
+  long *b_im_ptr = buf_valid(s->b_im_ptr_buf) ? s->b_im_ptr : NULL;
   if (map_to_exists_mode("", MODE_LANGMAP, false)) {
     // ":lmap" mappings exists, toggle use of mappings.
     State ^= MODE_LANGMAP;
-    if (s->b_im_ptr != NULL) {
+    if (b_im_ptr != NULL) {
       if (State & MODE_LANGMAP) {
-        *s->b_im_ptr = B_IMODE_LMAP;
+        *b_im_ptr = B_IMODE_LMAP;
       } else {
-        *s->b_im_ptr = B_IMODE_NONE;
+        *b_im_ptr = B_IMODE_NONE;
       }
     }
   }
 
-  if (s->b_im_ptr != NULL) {
-    if (s->b_im_ptr == &curbuf->b_p_iminsert) {
+  if (b_im_ptr != NULL) {
+    if (b_im_ptr == &curbuf->b_p_iminsert) {
       set_iminsert_global(curbuf);
     } else {
       set_imsearch_global(curbuf);
@@ -1592,7 +1618,7 @@ static int command_line_insert_reg(CommandLineState *s)
 
   bool literally = false;
   if (s->c != ESC) {               // use ESC to cancel inserting register
-    literally = i == Ctrl_R;
+    literally = i == Ctrl_R || is_literal_register(s->c);
     cmdline_paste(s->c, literally, false);
 
     // When there was a serious error abort getting the
@@ -1651,7 +1677,7 @@ static void command_line_left_right_mouse(CommandLineState *s)
 static void command_line_next_histidx(CommandLineState *s, bool next_match)
 {
   int j = (int)strlen(s->lookfor);
-  for (;;) {
+  while (true) {
     // one step backwards
     if (!next_match) {
       if (s->hiscnt == get_hislen()) {
@@ -2272,9 +2298,51 @@ static void cmdpreview_close_win(void)
   }
 }
 
+/// Save the undo state of a buffer for command preview.
+static void cmdpreview_save_undo(CpUndoInfo *cp_undoinfo, buf_T *buf)
+  FUNC_ATTR_NONNULL_ALL
+{
+  cp_undoinfo->save_b_u_synced = buf->b_u_synced;
+  cp_undoinfo->save_b_u_oldhead = buf->b_u_oldhead;
+  cp_undoinfo->save_b_u_newhead = buf->b_u_newhead;
+  cp_undoinfo->save_b_u_curhead = buf->b_u_curhead;
+  cp_undoinfo->save_b_u_numhead = buf->b_u_numhead;
+  cp_undoinfo->save_b_u_seq_last = buf->b_u_seq_last;
+  cp_undoinfo->save_b_u_save_nr_last = buf->b_u_save_nr_last;
+  cp_undoinfo->save_b_u_seq_cur = buf->b_u_seq_cur;
+  cp_undoinfo->save_b_u_time_cur = buf->b_u_time_cur;
+  cp_undoinfo->save_b_u_save_nr_cur = buf->b_u_save_nr_cur;
+  cp_undoinfo->save_b_u_line_ptr = buf->b_u_line_ptr;
+  cp_undoinfo->save_b_u_line_lnum = buf->b_u_line_lnum;
+  cp_undoinfo->save_b_u_line_colnr = buf->b_u_line_colnr;
+}
+
+/// Restore the undo state of a buffer for command preview.
+static void cmdpreview_restore_undo(const CpUndoInfo *cp_undoinfo, buf_T *buf)
+{
+  buf->b_u_oldhead = cp_undoinfo->save_b_u_oldhead;
+  buf->b_u_newhead = cp_undoinfo->save_b_u_newhead;
+  buf->b_u_curhead = cp_undoinfo->save_b_u_curhead;
+  buf->b_u_numhead = cp_undoinfo->save_b_u_numhead;
+  buf->b_u_seq_last = cp_undoinfo->save_b_u_seq_last;
+  buf->b_u_save_nr_last = cp_undoinfo->save_b_u_save_nr_last;
+  buf->b_u_seq_cur = cp_undoinfo->save_b_u_seq_cur;
+  buf->b_u_time_cur = cp_undoinfo->save_b_u_time_cur;
+  buf->b_u_save_nr_cur = cp_undoinfo->save_b_u_save_nr_cur;
+  buf->b_u_line_ptr = cp_undoinfo->save_b_u_line_ptr;
+  buf->b_u_line_lnum = cp_undoinfo->save_b_u_line_lnum;
+  buf->b_u_line_colnr = cp_undoinfo->save_b_u_line_colnr;
+  if (buf->b_u_curhead == NULL) {
+    buf->b_u_synced = cp_undoinfo->save_b_u_synced;
+  }
+}
+
 /// Save current state and prepare windows and buffers for command preview.
 static void cmdpreview_prepare(CpInfo *cpinfo)
+  FUNC_ATTR_NONNULL_ALL
 {
+  Set(ptr_t) saved_bufs = SET_INIT;
+
   kv_init(cpinfo->buf_info);
   kv_init(cpinfo->win_info);
 
@@ -2286,20 +2354,19 @@ static void cmdpreview_prepare(CpInfo *cpinfo)
       continue;
     }
 
-    CpBufInfo cp_bufinfo;
-    cp_bufinfo.buf = buf;
+    if (!set_has(ptr_t, &saved_bufs, buf)) {
+      CpBufInfo cp_bufinfo;
+      cp_bufinfo.buf = buf;
+      cp_bufinfo.save_b_p_ul = buf->b_p_ul;
+      cp_bufinfo.save_b_changed = buf->b_changed;
+      cp_bufinfo.save_changedtick = buf_get_changedtick(buf);
+      cmdpreview_save_undo(&cp_bufinfo.undo_info, buf);
+      kv_push(cpinfo->buf_info, cp_bufinfo);
+      set_put(ptr_t, &saved_bufs, buf);
 
-    cp_bufinfo.save_b_u_synced = buf->b_u_synced;
-    cp_bufinfo.save_b_u_time_cur = buf->b_u_time_cur;
-    cp_bufinfo.save_b_u_seq_cur = buf->b_u_seq_cur;
-    cp_bufinfo.save_b_u_newhead = buf->b_u_newhead;
-    cp_bufinfo.save_b_p_ul = buf->b_p_ul;
-    cp_bufinfo.save_b_changed = buf->b_changed;
-    cp_bufinfo.save_changedtick = buf_get_changedtick(buf);
-
-    kv_push(cpinfo->buf_info, cp_bufinfo);
-
-    buf->b_p_ul = LONG_MAX;     // Make sure we can undo all changes
+      u_clearall(buf);
+      buf->b_p_ul = INT_MAX;  // Make sure we can undo all changes
+    }
 
     CpWinInfo cp_wininfo;
     cp_wininfo.win = win;
@@ -2318,6 +2385,8 @@ static void cmdpreview_prepare(CpInfo *cpinfo)
     win->w_p_cuc = false;       // Disable 'cursorcolumn' so it doesn't mess up the highlights
   }
 
+  set_destroy(ptr_t, &saved_bufs);
+
   cpinfo->save_hls = p_hls;
   cpinfo->save_cmdmod = cmdmod;
   win_size_save(&cpinfo->save_view);
@@ -2331,8 +2400,9 @@ static void cmdpreview_prepare(CpInfo *cpinfo)
   u_sync(true);
 }
 
-// Restore the state of buffers and windows before command preview.
+/// Restore the state of buffers and windows for command preview.
 static void cmdpreview_restore_state(CpInfo *cpinfo)
+  FUNC_ATTR_NONNULL_ALL
 {
   for (size_t i = 0; i < cpinfo->buf_info.size; i++) {
     CpBufInfo cp_bufinfo = cpinfo->buf_info.items[i];
@@ -2340,31 +2410,29 @@ static void cmdpreview_restore_state(CpInfo *cpinfo)
 
     buf->b_changed = cp_bufinfo.save_b_changed;
 
-    if (buf->b_u_seq_cur != cp_bufinfo.save_b_u_seq_cur) {
+    if (buf->b_u_seq_cur != cp_bufinfo.undo_info.save_b_u_seq_cur) {
       int count = 0;
 
       // Calculate how many undo steps are necessary to restore earlier state.
       for (u_header_T *uhp = buf->b_u_curhead ? buf->b_u_curhead : buf->b_u_newhead;
-           uhp != NULL && uhp->uh_seq > cp_bufinfo.save_b_u_seq_cur;
+           uhp != NULL;
            uhp = uhp->uh_next.ptr, ++count) {}
 
       aco_save_T aco;
       aucmd_prepbuf(&aco, buf);
+      // Ensure all the entries will be undone
+      if (curbuf->b_u_synced == false) {
+        u_sync(true);
+      }
       // Undo invisibly. This also moves the cursor!
       if (!u_undo_and_forget(count, false)) {
         abort();
       }
       aucmd_restbuf(&aco);
-
-      // Restore newhead. It is meaningless when curhead is valid, but we must
-      // restore it so that undotree() is identical before/after the preview.
-      buf->b_u_newhead = cp_bufinfo.save_b_u_newhead;
-      buf->b_u_time_cur = cp_bufinfo.save_b_u_time_cur;
     }
 
-    if (buf->b_u_curhead == NULL) {
-      buf->b_u_synced = cp_bufinfo.save_b_u_synced;
-    }
+    u_blockfree(buf);
+    cmdpreview_restore_undo(&cp_bufinfo.undo_info, buf);
 
     if (cp_bufinfo.save_changedtick != buf_get_changedtick(buf)) {
       buf_set_changedtick(buf, cp_bufinfo.save_changedtick);
@@ -2375,6 +2443,7 @@ static void cmdpreview_restore_state(CpInfo *cpinfo)
     // Clear preview highlights.
     extmark_clear(buf, (uint32_t)cmdpreview_ns, 0, 0, MAXLNUM, MAXCOL);
   }
+
   for (size_t i = 0; i < cpinfo->win_info.size; i++) {
     CpWinInfo cp_wininfo = cpinfo->win_info.items[i];
     win_T *win = cp_wininfo.win;
@@ -2423,7 +2492,7 @@ static bool cmdpreview_may_show(CommandLineState *s)
   // Copy the command line so we can modify it.
   int cmdpreview_type = 0;
   char *cmdline = xstrdup(ccline.cmdbuff);
-  char *errormsg = NULL;
+  const char *errormsg = NULL;
   emsg_off++;  // Block errors when parsing the command line, and don't update v:errmsg
   if (!parse_cmdline(cmdline, &ea, &cmdinfo, &errormsg)) {
     emsg_off--;
@@ -2446,7 +2515,7 @@ static bool cmdpreview_may_show(CommandLineState *s)
 
   CpInfo cpinfo;
   bool icm_split = *p_icm == 's';  // inccommand=split
-  buf_T *cmdpreview_buf;
+  buf_T *cmdpreview_buf = NULL;
   win_T *cmdpreview_win = NULL;
 
   emsg_silent++;                 // Block error reporting as the command may be incomplete,
@@ -2619,7 +2688,7 @@ static void abandon_cmdline(void)
 ///
 /// @param count  only used for incremental search
 /// @param indent  indent for inside conditionals
-char *getcmdline(int firstc, long count, int indent, bool do_concat FUNC_ATTR_UNUSED)
+char *getcmdline(int firstc, int count, int indent, bool do_concat FUNC_ATTR_UNUSED)
 {
   return (char *)command_line_enter(firstc, count, indent, true);
 }
@@ -2947,7 +3016,7 @@ static void color_expr_cmdline(const CmdlineInfo *const colored_ccline,
 {
   ParserLine parser_lines[] = {
     {
-      .data = (const char *)colored_ccline->cmdbuff,
+      .data = colored_ccline->cmdbuff,
       .size = strlen(colored_ccline->cmdbuff),
       .allocated = false,
     },
@@ -3051,7 +3120,7 @@ static bool color_cmdline(CmdlineInfo *colored_ccline)
   bool can_free_cb = false;
   TryState tstate;
   Error err = ERROR_INIT;
-  const char *err_errmsg = (const char *)e_intern2;
+  const char *err_errmsg = e_intern2;
   bool dgc_ret = true;
   bool tl_ret = true;
 
@@ -3084,8 +3153,7 @@ static bool color_cmdline(CmdlineInfo *colored_ccline)
   }
   if (colored_ccline->cmdbuff[colored_ccline->cmdlen] != NUL) {
     arg_allocated = true;
-    arg.vval.v_string = xmemdupz((const char *)colored_ccline->cmdbuff,
-                                 (size_t)colored_ccline->cmdlen);
+    arg.vval.v_string = xmemdupz(colored_ccline->cmdbuff, (size_t)colored_ccline->cmdlen);
   }
   // msg_start() called by e.g. :echo may shift command-line to the first column
   // even though msg_silent is here. Two ways to workaround this problem without
@@ -3204,8 +3272,7 @@ color_cmdline_end:
   if (arg_allocated) {
     ccline_colors->cmdbuff = arg.vval.v_string;
   } else {
-    ccline_colors->cmdbuff = xmemdupz((const char *)colored_ccline->cmdbuff,
-                                      (size_t)colored_ccline->cmdlen);
+    ccline_colors->cmdbuff = xmemdupz(colored_ccline->cmdbuff, (size_t)colored_ccline->cmdlen);
   }
   tv_clear(&tv);
   return ret;
@@ -3384,7 +3451,7 @@ static void ui_ext_cmdline_show(CmdlineInfo *line)
   } else {
     Array item = arena_array(&arena, 2);
     ADD_C(item, INTEGER_OBJ(0));
-    ADD_C(item, STRING_OBJ(cstr_as_string(line->cmdbuff)));
+    ADD_C(item, CSTR_AS_OBJ(line->cmdbuff));
     content = arena_array(&arena, 1);
     ADD_C(content, ARRAY_OBJ(item));
   }
@@ -3411,7 +3478,7 @@ void ui_ext_cmdline_block_append(size_t indent, const char *line)
 
   Array item = ARRAY_DICT_INIT;
   ADD(item, INTEGER_OBJ(0));
-  ADD(item, STRING_OBJ(cstr_as_string(buf)));
+  ADD(item, CSTR_AS_OBJ(buf));
   Array content = ARRAY_DICT_INIT;
   ADD(content, ARRAY_OBJ(item));
   ADD(cmdline_block, ARRAY_OBJ(content));
@@ -3527,7 +3594,7 @@ void unputcmdline(void)
 // part will be redrawn, otherwise it will not.  If this function is called
 // twice in a row, then 'redraw' should be false and redrawcmd() should be
 // called afterwards.
-void put_on_cmdline(char *str, int len, int redraw)
+void put_on_cmdline(const char *str, int len, int redraw)
 {
   int i;
   int m;
@@ -3737,7 +3804,7 @@ static bool cmdline_paste(int regname, bool literally, bool remcr)
 // When "literally" is true, insert literally.
 // When "literally" is false, insert as typed, but don't leave the command
 // line.
-void cmdline_paste_str(char *s, int literally)
+void cmdline_paste_str(const char *s, int literally)
 {
   if (literally) {
     put_on_cmdline(s, -1, true);
@@ -3747,7 +3814,7 @@ void cmdline_paste_str(char *s, int literally)
       if (cv == Ctrl_V && s[1]) {
         s++;
       }
-      int c = mb_cptr2char_adv((const char **)&s);
+      int c = mb_cptr2char_adv(&s);
       if (cv == Ctrl_V || c == ESC || c == Ctrl_C
           || c == CAR || c == NL || c == Ctrl_L
           || (c == Ctrl_BSL && *s == Ctrl_N)) {
@@ -4098,12 +4165,24 @@ static char *get_cmdline_completion(void)
   }
 
   set_expand_context(p->xpc);
-  char *cmd_compl = get_user_cmd_complete(p->xpc, p->xpc->xp_context);
-  if (cmd_compl != NULL) {
-    return xstrdup(cmd_compl);
+  if (p->xpc->xp_context == EXPAND_UNSUCCESSFUL) {
+    return NULL;
   }
 
-  return NULL;
+  char *cmd_compl = get_user_cmd_complete(p->xpc, p->xpc->xp_context);
+  if (cmd_compl == NULL) {
+    return NULL;
+  }
+
+  if (p->xpc->xp_context == EXPAND_USER_LIST
+      || p->xpc->xp_context == EXPAND_USER_DEFINED) {
+    size_t buflen = strlen(cmd_compl) + strlen(p->xpc->xp_arg) + 2;
+    char *buffer = xmalloc(buflen);
+    snprintf(buffer, buflen, "%s,%s", cmd_compl, p->xpc->xp_arg);
+    return buffer;
+  }
+
+  return xstrdup(cmd_compl);
 }
 
 /// "getcmdcompltype()" function
@@ -4211,7 +4290,8 @@ void f_setcmdline(typval_T *argvars, typval_T *rettv, EvalFuncData fptr)
     }
   }
 
-  rettv->vval.v_number = set_cmdline_str(argvars[0].vval.v_string, pos);
+  // Use tv_get_string() to handle a NULL string like an empty string.
+  rettv->vval.v_number = set_cmdline_str(tv_get_string(&argvars[0]), pos);
 }
 
 /// "setcmdpos()" function
@@ -4274,7 +4354,7 @@ void cmdline_init(void)
 
 /// Check value of 'cedit' and set cedit_key.
 /// Returns NULL if value is OK, error message otherwise.
-const char *check_cedit(void)
+const char *did_set_cedit(optset_T *args)
 {
   if (*p_cedit == NUL) {
     cedit_key = -1;
@@ -4339,6 +4419,7 @@ static int open_cmdwin(void)
   // Set "cmdwin_type" before any autocommands may mess things up.
   cmdwin_type = get_cmdline_type();
   cmdwin_level = ccline.level;
+  cmdwin_old_curwin = old_curwin;
 
   // Create empty command-line buffer.
   if (buf_open_scratch(0, _("[Command Line]")) == FAIL) {
@@ -4346,10 +4427,11 @@ static int open_cmdwin(void)
     win_close(curwin, true, false);
     ga_clear(&winsizes);
     cmdwin_type = 0;
+    cmdwin_old_curwin = NULL;
     return Ctrl_C;
   }
   // Command-line buffer has bufhidden=wipe, unlike a true "scratch" buffer.
-  set_option_value_give_err("bh", 0L, "wipe", OPT_LOCAL);
+  set_option_value_give_err("bh", STATIC_CSTR_AS_OPTVAL("wipe"), OPT_LOCAL);
   curbuf->b_p_ma = true;
   curwin->w_p_fen = false;
   curwin->w_p_rl = cmdmsg_rl;
@@ -4367,7 +4449,7 @@ static int open_cmdwin(void)
       add_map("<Tab>", "<C-X><C-V>", MODE_INSERT, true);
       add_map("<Tab>", "a<C-X><C-V>", MODE_NORMAL, true);
     }
-    set_option_value_give_err("ft", 0L, "vim", OPT_LOCAL);
+    set_option_value_give_err("ft", STATIC_CSTR_AS_OPTVAL("vim"), OPT_LOCAL);
   }
   curbuf->b_ro_locked--;
 
@@ -4398,7 +4480,7 @@ static int open_cmdwin(void)
   curwin->w_cursor.lnum = curbuf->b_ml.ml_line_count;
   curwin->w_cursor.col = ccline.cmdpos;
   changed_line_abv_curs();
-  invalidate_botline();
+  invalidate_botline(curwin);
   if (ui_has(kUICmdline)) {
     ccline.redraw_state = kCmdRedrawNone;
     ui_call_cmdline_hide(ccline.level);
@@ -4442,6 +4524,7 @@ static int open_cmdwin(void)
 
   cmdwin_type = 0;
   cmdwin_level = 0;
+  cmdwin_old_curwin = NULL;
 
   exmode_active = save_exmode;
 
@@ -4489,7 +4572,8 @@ static int open_cmdwin(void)
       ccline.cmdlen = (int)strlen(ccline.cmdbuff);
       ccline.cmdbufflen = ccline.cmdlen + 1;
       ccline.cmdpos = curwin->w_cursor.col;
-      if (ccline.cmdpos > ccline.cmdlen) {
+      // If the cursor is on the last character, it probably should be after it.
+      if (ccline.cmdpos == ccline.cmdlen - 1 || ccline.cmdpos > ccline.cmdlen) {
         ccline.cmdpos = ccline.cmdlen;
       }
       if (cmdwin_result == K_IGNORE) {
@@ -4558,39 +4642,37 @@ bool is_in_cmdwin(void)
 char *script_get(exarg_T *const eap, size_t *const lenp)
   FUNC_ATTR_NONNULL_ALL FUNC_ATTR_WARN_UNUSED_RESULT FUNC_ATTR_MALLOC
 {
-  const char *const cmd = (const char *)eap->arg;
+  char *cmd = eap->arg;
 
   if (cmd[0] != '<' || cmd[1] != '<' || eap->getline == NULL) {
     *lenp = strlen(eap->arg);
     return eap->skip ? NULL : xmemdupz(eap->arg, *lenp);
   }
+  cmd += 2;
 
   garray_T ga = { .ga_data = NULL, .ga_len = 0 };
+
+  list_T *const l = heredoc_get(eap, cmd, true);
+  if (l == NULL) {
+    return NULL;
+  }
+
   if (!eap->skip) {
     ga_init(&ga, 1, 0x400);
   }
 
-  const char *const end_pattern = (cmd[2] != NUL ? (const char *)skipwhite(cmd + 2) : ".");
-  for (;;) {
-    char *const theline = eap->getline(eap->cstack->cs_looplevel > 0 ? -1 : NUL, eap->cookie, 0,
-                                       true);
-
-    if (theline == NULL || strcmp(end_pattern, theline) == 0) {
-      xfree(theline);
-      break;
-    }
-
+  TV_LIST_ITER_CONST(l, li, {
     if (!eap->skip) {
-      ga_concat(&ga, theline);
+      ga_concat(&ga, tv_get_string(TV_LIST_ITEM_TV(li)));
       ga_append(&ga, '\n');
     }
-    xfree(theline);
-  }
+  });
   *lenp = (size_t)ga.ga_len;  // Set length without trailing NUL.
   if (!eap->skip) {
     ga_append(&ga, NUL);
   }
 
+  tv_list_free(l);
   return (char *)ga.ga_data;
 }
 

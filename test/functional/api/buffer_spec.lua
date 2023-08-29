@@ -16,6 +16,7 @@ local command = helpers.command
 local bufmeths = helpers.bufmeths
 local feed = helpers.feed
 local pcall_err = helpers.pcall_err
+local assert_alive = helpers.assert_alive
 
 describe('api/buf', function()
   before_each(clear)
@@ -39,6 +40,14 @@ describe('api/buf', function()
       curbuf_depr('del_line', -1)
       -- There's always at least one line
       eq(1, curbuf_depr('line_count'))
+    end)
+
+    it("doesn't crash just after set undolevels=1 #24894", function()
+      local buf = meths.create_buf(false, true)
+      meths.buf_set_option(buf, 'undolevels', -1)
+      meths.buf_set_lines(buf, 0, 1, false, { })
+
+      assert_alive()
     end)
 
     it('cursor position is maintained after lines are inserted #9961', function()
@@ -76,6 +85,38 @@ describe('api/buf', function()
       eq({4, 2}, curwin('get_cursor'))
     end)
 
+    it('cursor position is maintained in non-current window', function()
+      meths.buf_set_lines(0, 0, -1, 1, {"line1", "line2", "line3", "line4"})
+      meths.win_set_cursor(0, {3, 2})
+      local win = meths.get_current_win()
+      local buf = meths.get_current_buf()
+
+      command('new')
+
+      meths.buf_set_lines(buf, 1, 2, 1, {"line5", "line6"})
+      eq({"line1", "line5", "line6", "line3", "line4"}, meths.buf_get_lines(buf, 0, -1, true))
+      eq({4, 2}, meths.win_get_cursor(win))
+    end)
+
+    it('cursor position is maintained in TWO non-current windows', function()
+      meths.buf_set_lines(0, 0, -1, 1, {"line1", "line2", "line3", "line4"})
+      meths.win_set_cursor(0, {3, 2})
+      local win = meths.get_current_win()
+      local buf = meths.get_current_buf()
+
+      command('split')
+      meths.win_set_cursor(0, {4, 2})
+      local win2 = meths.get_current_win()
+
+      -- set current window to third one with another buffer
+      command("new")
+
+      meths.buf_set_lines(buf, 1, 2, 1, {"line5", "line6"})
+      eq({"line1", "line5", "line6", "line3", "line4"}, meths.buf_get_lines(buf, 0, -1, true))
+      eq({4, 2}, meths.win_get_cursor(win))
+      eq({5, 2}, meths.win_get_cursor(win2))
+    end)
+
     it('line_count has defined behaviour for unloaded buffers', function()
       -- we'll need to know our bufnr for when it gets unloaded
       local bufnr = curbuf('get_number')
@@ -104,6 +145,285 @@ describe('api/buf', function()
       eq({}, buffer('get_lines', bufnr, 1, 3, 1))
       -- it's impossible to get out-of-bounds errors for an unloaded buffer
       eq({}, buffer('get_lines', bufnr, 8888, 9999, 1))
+    end)
+
+    describe('handles topline', function()
+      local screen
+      before_each(function()
+        screen = Screen.new(20, 12)
+        screen:set_default_attr_ids {
+          [1] = {bold = true, foreground = Screen.colors.Blue1};
+          [2] = {reverse = true, bold = true};
+          [3] = {reverse = true};
+        }
+        screen:attach()
+        meths.buf_set_lines(0, 0, -1, 1, {"aaa", "bbb", "ccc", "ddd", "www", "xxx", "yyy", "zzz"})
+        meths.set_option_value('modified', false, {})
+      end)
+
+      it('of current window', function()
+        local win = meths.get_current_win()
+        local buf = meths.get_current_buf()
+
+        command('new | wincmd w')
+        meths.win_set_cursor(win, {8,0})
+
+        screen:expect{grid=[[
+                              |
+          {1:~                   }|
+          {1:~                   }|
+          {1:~                   }|
+          {1:~                   }|
+          {3:[No Name]           }|
+          www                 |
+          xxx                 |
+          yyy                 |
+          ^zzz                 |
+          {2:[No Name]           }|
+                              |
+        ]]}
+
+        meths.buf_set_lines(buf, 0, 2, true, {"aaabbb"})
+        screen:expect{grid=[[
+                              |
+          {1:~                   }|
+          {1:~                   }|
+          {1:~                   }|
+          {1:~                   }|
+          {3:[No Name]           }|
+          www                 |
+          xxx                 |
+          yyy                 |
+          ^zzz                 |
+          {2:[No Name] [+]       }|
+                              |
+        ]]}
+
+        -- replacing topline keeps it the topline
+        meths.buf_set_lines(buf, 3, 4, true, {"wwweeee"})
+        screen:expect{grid=[[
+                              |
+          {1:~                   }|
+          {1:~                   }|
+          {1:~                   }|
+          {1:~                   }|
+          {3:[No Name]           }|
+          wwweeee             |
+          xxx                 |
+          yyy                 |
+          ^zzz                 |
+          {2:[No Name] [+]       }|
+                              |
+        ]]}
+
+        -- inserting just before topline does not scroll up if cursor would be moved
+        meths.buf_set_lines(buf, 3, 3, true, {"mmm"})
+        screen:expect{grid=[[
+                              |
+          {1:~                   }|
+          {1:~                   }|
+          {1:~                   }|
+          {1:~                   }|
+          {3:[No Name]           }|
+          wwweeee             |
+          xxx                 |
+          yyy                 |
+          ^zzz                 |
+          {2:[No Name] [+]       }|
+                              |
+        ]], unchanged=true}
+
+        meths.win_set_cursor(0, {7, 0})
+        screen:expect{grid=[[
+                              |
+          {1:~                   }|
+          {1:~                   }|
+          {1:~                   }|
+          {1:~                   }|
+          {3:[No Name]           }|
+          wwweeee             |
+          xxx                 |
+          ^yyy                 |
+          zzz                 |
+          {2:[No Name] [+]       }|
+                              |
+        ]]}
+
+        meths.buf_set_lines(buf, 4, 4, true, {"mmmeeeee"})
+        screen:expect{grid=[[
+                              |
+          {1:~                   }|
+          {1:~                   }|
+          {1:~                   }|
+          {1:~                   }|
+          {3:[No Name]           }|
+          mmmeeeee            |
+          wwweeee             |
+          xxx                 |
+          ^yyy                 |
+          {2:[No Name] [+]       }|
+                              |
+        ]]}
+      end)
+
+      it('of non-current window', function()
+        local win = meths.get_current_win()
+        local buf = meths.get_current_buf()
+
+        command('new')
+        meths.win_set_cursor(win, {8,0})
+
+        screen:expect{grid=[[
+          ^                    |
+          {1:~                   }|
+          {1:~                   }|
+          {1:~                   }|
+          {1:~                   }|
+          {2:[No Name]           }|
+          www                 |
+          xxx                 |
+          yyy                 |
+          zzz                 |
+          {3:[No Name]           }|
+                              |
+        ]]}
+
+        meths.buf_set_lines(buf, 0, 2, true, {"aaabbb"})
+        screen:expect{grid=[[
+          ^                    |
+          {1:~                   }|
+          {1:~                   }|
+          {1:~                   }|
+          {1:~                   }|
+          {2:[No Name]           }|
+          www                 |
+          xxx                 |
+          yyy                 |
+          zzz                 |
+          {3:[No Name] [+]       }|
+                              |
+        ]]}
+
+        -- replacing topline keeps it the topline
+        meths.buf_set_lines(buf, 3, 4, true, {"wwweeee"})
+        screen:expect{grid=[[
+          ^                    |
+          {1:~                   }|
+          {1:~                   }|
+          {1:~                   }|
+          {1:~                   }|
+          {2:[No Name]           }|
+          wwweeee             |
+          xxx                 |
+          yyy                 |
+          zzz                 |
+          {3:[No Name] [+]       }|
+                              |
+        ]]}
+
+        -- inserting just before topline scrolls up
+        meths.buf_set_lines(buf, 3, 3, true, {"mmm"})
+        screen:expect{grid=[[
+          ^                    |
+          {1:~                   }|
+          {1:~                   }|
+          {1:~                   }|
+          {1:~                   }|
+          {2:[No Name]           }|
+          mmm                 |
+          wwweeee             |
+          xxx                 |
+          yyy                 |
+          {3:[No Name] [+]       }|
+                              |
+        ]]}
+      end)
+
+      it('of split windows with same buffer', function()
+        local win = meths.get_current_win()
+        local buf = meths.get_current_buf()
+
+        command('split')
+        meths.win_set_cursor(win, {8,0})
+        meths.win_set_cursor(0, {1,0})
+
+        screen:expect{grid=[[
+          ^aaa                 |
+          bbb                 |
+          ccc                 |
+          ddd                 |
+          www                 |
+          {2:[No Name]           }|
+          www                 |
+          xxx                 |
+          yyy                 |
+          zzz                 |
+          {3:[No Name]           }|
+                              |
+        ]]}
+        meths.buf_set_lines(buf, 0, 2, true, {"aaabbb"})
+
+        screen:expect{grid=[[
+          ^aaabbb              |
+          ccc                 |
+          ddd                 |
+          www                 |
+          xxx                 |
+          {2:[No Name] [+]       }|
+          www                 |
+          xxx                 |
+          yyy                 |
+          zzz                 |
+          {3:[No Name] [+]       }|
+                              |
+        ]]}
+
+        -- replacing topline keeps it the topline
+        meths.buf_set_lines(buf, 3, 4, true, {"wwweeee"})
+        screen:expect{grid=[[
+          ^aaabbb              |
+          ccc                 |
+          ddd                 |
+          wwweeee             |
+          xxx                 |
+          {2:[No Name] [+]       }|
+          wwweeee             |
+          xxx                 |
+          yyy                 |
+          zzz                 |
+          {3:[No Name] [+]       }|
+                              |
+        ]]}
+
+        -- inserting just before topline scrolls up
+        meths.buf_set_lines(buf, 3, 3, true, {"mmm"})
+        screen:expect{grid=[[
+          ^aaabbb              |
+          ccc                 |
+          ddd                 |
+          mmm                 |
+          wwweeee             |
+          {2:[No Name] [+]       }|
+          mmm                 |
+          wwweeee             |
+          xxx                 |
+          yyy                 |
+          {3:[No Name] [+]       }|
+                              |
+        ]]}
+      end)
+    end)
+
+    it('handles clearing out non-current buffer #24911', function()
+        local buf = meths.get_current_buf()
+        meths.buf_set_lines(buf, 0, -1, true, {"aaa", "bbb", "ccc"})
+        command("new")
+
+        meths.buf_set_lines(0, 0, -1, true, {"xxx", "yyy", "zzz"})
+
+        meths.buf_set_lines(buf, 0, -1, true, {})
+        eq({"xxx", "yyy", "zzz"}, meths.buf_get_lines(0, 0, -1, true))
+        eq({''}, meths.buf_get_lines(buf, 0, -1, true))
     end)
   end)
 
@@ -437,6 +757,10 @@ describe('api/buf', function()
       -- can append to a line
       set_text(1, 4, -1, 4, {' and', 'more'})
       eq({'goodbye bar', 'text and', 'more'}, get_lines(0, 3, true))
+
+      -- can use negative column numbers
+      set_text(0, -5, 0, -1, {'!'})
+      eq({'goodbye!'}, get_lines(0, 1, true))
     end)
 
     it('works with undo', function()
@@ -478,6 +802,50 @@ describe('api/buf', function()
       eq('hello foo!', curbuf_depr('get_line', 0))
       -- cursor should be moved left by two columns (replacement is shorter by 2 chars)
       eq({1, 9}, curwin('get_cursor'))
+    end)
+
+    it('updates the cursor position in non-current window', function()
+      insert([[
+      hello world!]])
+
+      -- position the cursor on `!`
+      meths.win_set_cursor(0, {1, 11})
+
+      local win = meths.get_current_win()
+      local buf = meths.get_current_buf()
+
+      command("new")
+
+      -- replace 'world' with 'foo'
+      meths.buf_set_text(buf, 0, 6, 0, 11, {'foo'})
+      eq({'hello foo!'}, meths.buf_get_lines(buf, 0, -1, true))
+      -- cursor should be moved left by two columns (replacement is shorter by 2 chars)
+      eq({1, 9}, meths.win_get_cursor(win))
+    end)
+
+    it('updates the cursor position in TWO non-current windows', function()
+      insert([[
+      hello world!]])
+
+      -- position the cursor on `!`
+      meths.win_set_cursor(0, {1, 11})
+      local win = meths.get_current_win()
+      local buf = meths.get_current_buf()
+
+      command("split")
+      local win2 = meths.get_current_win()
+      -- position the cursor on `w`
+      meths.win_set_cursor(0, {1, 6})
+
+      command("new")
+
+      -- replace 'hello' with 'foo'
+      meths.buf_set_text(buf, 0, 0, 0, 5, {'foo'})
+      eq({'foo world!'}, meths.buf_get_lines(buf, 0, -1, true))
+
+      -- both cursors should be moved left by two columns (replacement is shorter by 2 chars)
+      eq({1, 9}, meths.win_get_cursor(win))
+      eq({1, 4}, meths.win_get_cursor(win2))
     end)
 
     it('can handle NULs', function()
@@ -579,6 +947,139 @@ describe('api/buf', function()
       ]])
       eq({'one', 'two'}, get_lines(0, 2, true))
     end)
+
+    describe('handles topline', function()
+      local screen
+      before_each(function()
+        screen = Screen.new(20, 12)
+        screen:set_default_attr_ids {
+          [1] = {bold = true, foreground = Screen.colors.Blue1};
+          [2] = {reverse = true, bold = true};
+          [3] = {reverse = true};
+        }
+        screen:attach()
+        meths.buf_set_lines(0, 0, -1, 1, {"aaa", "bbb", "ccc", "ddd", "www", "xxx", "yyy", "zzz"})
+        meths.set_option_value('modified', false, {})
+      end)
+
+      it('of current window', function()
+        local win = meths.get_current_win()
+        local buf = meths.get_current_buf()
+
+        command('new | wincmd w')
+        meths.win_set_cursor(win, {8,0})
+
+        screen:expect{grid=[[
+                              |
+          {1:~                   }|
+          {1:~                   }|
+          {1:~                   }|
+          {1:~                   }|
+          {3:[No Name]           }|
+          www                 |
+          xxx                 |
+          yyy                 |
+          ^zzz                 |
+          {2:[No Name]           }|
+                              |
+        ]]}
+        meths.buf_set_text(buf, 0,3, 1,0, {"X"})
+
+        screen:expect{grid=[[
+                              |
+          {1:~                   }|
+          {1:~                   }|
+          {1:~                   }|
+          {1:~                   }|
+          {3:[No Name]           }|
+          www                 |
+          xxx                 |
+          yyy                 |
+          ^zzz                 |
+          {2:[No Name] [+]       }|
+                              |
+        ]]}
+      end)
+
+      it('of non-current window', function()
+        local win = meths.get_current_win()
+        local buf = meths.get_current_buf()
+
+        command('new')
+        meths.win_set_cursor(win, {8,0})
+
+        screen:expect{grid=[[
+          ^                    |
+          {1:~                   }|
+          {1:~                   }|
+          {1:~                   }|
+          {1:~                   }|
+          {2:[No Name]           }|
+          www                 |
+          xxx                 |
+          yyy                 |
+          zzz                 |
+          {3:[No Name]           }|
+                              |
+        ]]}
+
+        meths.buf_set_text(buf, 0,3, 1,0, {"X"})
+        screen:expect{grid=[[
+          ^                    |
+          {1:~                   }|
+          {1:~                   }|
+          {1:~                   }|
+          {1:~                   }|
+          {2:[No Name]           }|
+          www                 |
+          xxx                 |
+          yyy                 |
+          zzz                 |
+          {3:[No Name] [+]       }|
+                              |
+        ]]}
+      end)
+
+      it('of split windows with same buffer', function()
+        local win = meths.get_current_win()
+        local buf = meths.get_current_buf()
+
+        command('split')
+        meths.win_set_cursor(win, {8,0})
+        meths.win_set_cursor(0, {1,1})
+
+        screen:expect{grid=[[
+          a^aa                 |
+          bbb                 |
+          ccc                 |
+          ddd                 |
+          www                 |
+          {2:[No Name]           }|
+          www                 |
+          xxx                 |
+          yyy                 |
+          zzz                 |
+          {3:[No Name]           }|
+                              |
+        ]]}
+        meths.buf_set_text(buf, 0,3, 1,0, {"X"})
+
+        screen:expect{grid=[[
+          a^aaXbbb             |
+          ccc                 |
+          ddd                 |
+          www                 |
+          xxx                 |
+          {2:[No Name] [+]       }|
+          www                 |
+          xxx                 |
+          yyy                 |
+          zzz                 |
+          {3:[No Name] [+]       }|
+                              |
+        ]]}
+      end)
+    end)
   end)
 
   describe_lua_and_rpc('nvim_buf_get_text', function(api)
@@ -630,19 +1131,19 @@ describe('api/buf', function()
       eq('Index out of bounds', pcall_err(get_offset, 6))
       eq('Index out of bounds', pcall_err(get_offset, -1))
 
-      curbufmeths.set_option('eol', false)
-      curbufmeths.set_option('fixeol', false)
+      meths.set_option_value('eol', false, {})
+      meths.set_option_value('fixeol', false, {})
       eq(28, get_offset(5))
 
       -- fileformat is ignored
-      curbufmeths.set_option('fileformat', 'dos')
+      meths.set_option_value('fileformat', 'dos', {})
       eq(0, get_offset(0))
       eq(6, get_offset(1))
       eq(15, get_offset(2))
       eq(16, get_offset(3))
       eq(24, get_offset(4))
       eq(28, get_offset(5))
-      curbufmeths.set_option('eol', true)
+      meths.set_option_value('eol', true, {})
       eq(29, get_offset(5))
 
       command("set hidden")
@@ -697,23 +1198,23 @@ describe('api/buf', function()
     end)
   end)
 
-  describe('nvim_buf_get_option, nvim_buf_set_option', function()
+  describe('nvim_get_option_value, nvim_set_option_value', function()
     it('works', function()
-      eq(8, curbuf('get_option', 'shiftwidth'))
-      curbuf('set_option', 'shiftwidth', 4)
-      eq(4, curbuf('get_option', 'shiftwidth'))
+      eq(8, nvim('get_option_value', 'shiftwidth', {}))
+      nvim('set_option_value', 'shiftwidth', 4, {})
+      eq(4, nvim('get_option_value', 'shiftwidth', {}))
       -- global-local option
-      curbuf('set_option', 'define', 'test')
-      eq('test', curbuf('get_option', 'define'))
+      nvim('set_option_value', 'define', 'test', {buf = 0})
+      eq('test', nvim('get_option_value', 'define', {buf = 0}))
       -- Doesn't change the global value
-      eq([[^\s*#\s*define]], nvim('get_option', 'define'))
+      eq("", nvim('get_option_value', 'define', {scope='global'}))
     end)
 
     it('returns values for unset local options', function()
       -- 'undolevels' is only set to its "unset" value when a new buffer is
       -- created
       command('enew')
-      eq(-123456, curbuf('get_option', 'undolevels'))
+      eq(-123456, nvim('get_option_value', 'undolevels', {buf=0}))
     end)
   end)
 

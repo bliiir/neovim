@@ -269,7 +269,7 @@ func Test_statusline()
   call assert_match('^vimLineComment\s*$', s:get_statusline())
   syntax off
 
-  "%{%expr%}: evaluates enxpressions present in result of expr
+  "%{%expr%}: evaluates expressions present in result of expr
   func! Inner_eval()
     return '%n some other text'
   endfunc
@@ -442,6 +442,13 @@ func Test_statusline()
   call delete('Xstatusline')
   set statusline&
   set splitbelow&
+endfunc
+
+func Test_statusline_trailing_percent_zero()
+  " this was causing illegal memory access
+  set laststatus=2 stl=%!%0
+  call assert_fails('redraw', 'E15: Invalid expression: "%0"')
+  set laststatus& stl&
 endfunc
 
 func Test_statusline_visual()

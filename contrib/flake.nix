@@ -7,15 +7,64 @@
   };
 
   outputs = { self, nixpkgs, flake-utils }:
+    let
+      inherit (builtins)
+        elemAt
+        foldl'
+        mapAttrs
+        match
+        readFile
+        ;
+      inherit (nixpkgs.lib)
+        const
+        flip
+        pipe
+        remove
+        splitString
+        toLower
+        ;
+    in
     {
       overlay = final: prev: {
 
-        neovim = final.neovim-unwrapped.overrideAttrs (oa: rec {
+        neovim = (final.neovim-unwrapped.override {
+          treesitter-parsers = pipe ../cmake.deps/deps.txt [
+            readFile
+            (splitString "\n")
+            (map (match "TREESITTER_([A-Z_]+)_(URL|SHA256)[[:space:]]+([^[:space:]]+)[[:space:]]*"))
+            (remove null)
+            (flip foldl' { }
+              (acc: matches:
+                let
+                  lang = toLower (elemAt matches 0);
+                  type = toLower (elemAt matches 1);
+                  value = elemAt matches 2;
+                in
+                acc // {
+                  ${lang} = acc.${lang} or { } // {
+                    ${type} = value;
+                  };
+                }))
+            (mapAttrs (const final.fetchurl))
+            (self: self // {
+              markdown = final.stdenv.mkDerivation {
+                inherit (self.markdown) name;
+                src = self.markdown;
+                installPhase = ''
+                  mv tree-sitter-markdown $out
+                '';
+              };
+            })
+          ];
+        }).overrideAttrs (oa: rec {
           version = self.shortRev or "dirty";
           src = ../.;
-          preConfigure = ''
+          preConfigure = oa.preConfigure or "" + ''
             sed -i cmake.config/versiondef.h.in -e 's/@NVIM_VERSION_PRERELEASE@/-dev-${version}/'
           '';
+          nativeBuildInputs = oa.nativeBuildInputs ++ [
+            final.libiconv
+          ];
         });
 
         # a development binary to help debug issues
@@ -103,7 +152,6 @@
 
               # ASAN_OPTIONS=detect_leaks=1
               export ASAN_OPTIONS="log_path=./test.log:abort_on_error=1"
-              export UBSAN_OPTIONS=print_stacktrace=1
 
               # for treesitter functionaltests
               mkdir -p runtime/parser

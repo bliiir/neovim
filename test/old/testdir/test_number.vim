@@ -138,7 +138,7 @@ func Test_number_with_linewrap1()
   call s:validate_cursor()
   let lines = s:screen_lines(1, 3)
   let expect = [
-\ "--1 aaaa",
+\ "<<< aaaa",
 \ "    aaaa",
 \ "    aaaa",
 \ ]
@@ -280,7 +280,7 @@ func Test_relativenumber_colors()
 
   " Check that the balloon shows up after a mouse move
   let buf = RunVimInTerminal('-S XTest_relnr', {'rows': 10, 'cols': 50})
-  call term_wait(buf, 100)
+  call TermWait(buf, 50)
   " Default colors
   call VerifyScreenDump(buf, 'Test_relnr_colors_1', {})
 

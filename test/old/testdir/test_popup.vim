@@ -676,7 +676,9 @@ endfunc
 
 func Test_popup_and_window_resize()
   CheckFeature terminal
+  CheckFeature quickfix
   CheckNotGui
+  let g:test_is_flaky = 1
 
   let h = winheight(0)
   if h < 15
@@ -691,11 +693,11 @@ func Test_popup_and_window_resize()
 
   call term_sendkeys(buf, "Gi\<c-x>")
   call term_sendkeys(buf, "\<c-v>")
-  call term_wait(buf, 100)
+  call TermWait(buf, 50)
   " popup first entry "!" must be at the top
   call WaitForAssert({-> assert_match('^!\s*$', term_getline(buf, 1))})
   exe 'resize +' . (h - 1)
-  call term_wait(buf, 100)
+  call TermWait(buf, 50)
   redraw!
   " popup shifted down, first line is now empty
   call WaitForAssert({-> assert_equal('', term_getline(buf, 1))})
@@ -759,11 +761,11 @@ func Test_popup_and_previewwindow_dump()
   let buf = RunVimInTerminal('-S Xscript', {})
 
   " wait for the script to finish
-  call term_wait(buf)
+  call TermWait(buf)
 
   " Test that popup and previewwindow do not overlap.
   call term_sendkeys(buf, "o")
-  call term_wait(buf, 100)
+  call TermWait(buf, 50)
   call term_sendkeys(buf, "\<C-X>\<C-N>")
   call VerifyScreenDump(buf, 'Test_popup_and_previewwindow_01', {})
 
@@ -885,14 +887,14 @@ func Test_popup_command_dump()
       echomsg 'changed'
     endfunc
   END
-  call writefile(script, 'XtimerScript')
+  call writefile(script, 'XtimerScript', 'D')
 
   let lines =<< trim END
 	one two three four five
 	and one two Xthree four five
 	one more two three four five
   END
-  call writefile(lines, 'Xtest')
+  call writefile(lines, 'Xtest', 'D')
   let buf = RunVimInTerminal('-S XtimerScript Xtest', {})
   call term_sendkeys(buf, ":source $VIMRUNTIME/menu.vim\<CR>")
   call term_sendkeys(buf, "/X\<CR>:popup PopUp\<CR>")
@@ -910,7 +912,7 @@ func Test_popup_command_dump()
 
   " Set a timer to change a menu entry while it's displayed.  The text should
   " not change but the command does.  Making the screendump also verifies that
-  " "changed" shows up, which means the timer triggered
+  " "changed" shows up, which means the timer triggered.
   call term_sendkeys(buf, "/X\<CR>:call StartTimer() | popup PopUp\<CR>")
   call VerifyScreenDump(buf, 'Test_popup_command_04', {})
 
@@ -918,9 +920,16 @@ func Test_popup_command_dump()
   call term_sendkeys(buf, "jj\<CR>")
   call VerifyScreenDump(buf, 'Test_popup_command_05', {})
 
+  call term_sendkeys(buf, "\<Esc>")
+
+  " Add a window toolbar to the window and check the :popup menu position.
+  call term_sendkeys(buf, ":nnoremenu WinBar.TEST :\<CR>")
+  call term_sendkeys(buf, "/X\<CR>:popup PopUp\<CR>")
+  call VerifyScreenDump(buf, 'Test_popup_command_06', {})
+
+  call term_sendkeys(buf, "\<Esc>")
+
   call StopVimInTerminal(buf)
-  call delete('Xtest')
-  call delete('XtimerScript')
 endfunc
 
 func Test_popup_complete_backwards()
@@ -1201,7 +1210,6 @@ func Test_pum_rightleft()
   let buf = RunVimInTerminal('--cmd "set rightleft" Xtest1', {})
   call term_wait(buf)
   call term_sendkeys(buf, "Go\<C-P>")
-  call term_wait(buf)
   call VerifyScreenDump(buf, 'Test_pum_rightleft_01', {'rows': 8})
   call term_sendkeys(buf, "\<C-P>\<C-Y>")
   call term_wait(buf)
@@ -1243,7 +1251,6 @@ func Test_pum_scrollbar()
   let buf = RunVimInTerminal('--cmd "set pumheight=2" Xtest1', {})
   call term_wait(buf)
   call term_sendkeys(buf, "Go\<C-P>\<C-P>\<C-P>")
-  call term_wait(buf)
   call VerifyScreenDump(buf, 'Test_pum_scrollbar_01', {'rows': 7})
   call term_sendkeys(buf, "\<C-E>\<Esc>dd")
   call term_wait(buf)
@@ -1252,7 +1259,6 @@ func Test_pum_scrollbar()
     call term_sendkeys(buf, ":set rightleft\<CR>")
     call term_wait(buf)
     call term_sendkeys(buf, "Go\<C-P>\<C-P>\<C-P>")
-    call term_wait(buf)
     call VerifyScreenDump(buf, 'Test_pum_scrollbar_02', {'rows': 7})
   endif
 

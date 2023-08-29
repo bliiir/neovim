@@ -204,7 +204,7 @@ static inline void clear_hist_entry(histentry_T *hisptr)
 /// If 'move_to_front' is true, matching entry is moved to end of history.
 ///
 /// @param move_to_front  Move the entry to the front if it exists
-static int in_history(int type, char *str, int move_to_front, int sep)
+static int in_history(int type, const char *str, int move_to_front, int sep)
 {
   int last_i = -1;
 
@@ -238,7 +238,7 @@ static int in_history(int type, char *str, int move_to_front, int sep)
   }
 
   list_T *const list = history[type][i].additional_elements;
-  str = history[type][i].hisstr;
+  char *const save_hisstr = history[type][i].hisstr;
   while (i != hisidx[type]) {
     if (++i >= hislen) {
       i = 0;
@@ -248,7 +248,7 @@ static int in_history(int type, char *str, int move_to_front, int sep)
   }
   tv_list_unref(list);
   history[type][i].hisnum = ++hisnum[type];
-  history[type][i].hisstr = str;
+  history[type][i].hisstr = save_hisstr;
   history[type][i].timestamp = os_time();
   history[type][i].additional_elements = NULL;
   return true;
@@ -295,7 +295,7 @@ static int last_maptick = -1;           // last seen maptick
 /// @param histype  may be one of the HIST_ values.
 /// @param in_map   consider maptick when inside a mapping
 /// @param sep      separator character used (search hist)
-void add_to_history(int histype, char *new_entry, int in_map, int sep)
+void add_to_history(int histype, const char *new_entry, int in_map, int sep)
 {
   histentry_T *hisptr;
 
@@ -538,7 +538,7 @@ void f_histadd(typval_T *argvars, typval_T *rettv, EvalFuncData fptr)
   }
 
   init_history();
-  add_to_history(histype, (char *)str, false, NUL);
+  add_to_history(histype, str, false, NUL);
   rettv->vval.v_number = true;
 }
 
@@ -622,7 +622,7 @@ void ex_history(exarg_T *eap)
     }
     histype1 = get_histtype(arg, (size_t)(end - arg), false);
     if (histype1 == HIST_INVALID) {
-      if (STRNICMP(arg, "all", end - (char *)arg) == 0) {
+      if (STRNICMP(arg, "all", end - arg) == 0) {
         histype1 = 0;
         histype2 = HIST_COUNT - 1;
       } else {
@@ -641,9 +641,10 @@ void ex_history(exarg_T *eap)
   }
 
   for (; !got_int && histype1 <= histype2; histype1++) {
-    STRCPY(IObuff, "\n      #  ");
+    xstrlcpy(IObuff, "\n      #  ", IOSIZE);
     assert(history_names[histype1] != NULL);
-    STRCAT(STRCAT(IObuff, history_names[histype1]), " history");
+    xstrlcat(IObuff, history_names[histype1], IOSIZE);
+    xstrlcat(IObuff, " history", IOSIZE);
     msg_puts_title(IObuff);
     int idx = hisidx[histype1];
     histentry_T *hist = history[histype1];
@@ -669,7 +670,7 @@ void ex_history(exarg_T *eap)
             trunc_string(hist[i].hisstr, IObuff + strlen(IObuff),
                          Columns - 10, IOSIZE - (int)strlen(IObuff));
           } else {
-            STRCAT(IObuff, hist[i].hisstr);
+            xstrlcat(IObuff, hist[i].hisstr, IOSIZE);
           }
           msg_outtrans(IObuff);
         }
