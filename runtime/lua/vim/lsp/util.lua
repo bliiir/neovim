@@ -454,23 +454,6 @@ function M.apply_text_edits(text_edits, bufnr, offset_encoding)
     end
   end)
 
-  -- Some LSP servers are depending on the VSCode behavior.
-  -- The VSCode will re-locate the cursor position after applying TextEdit so we also do it.
-  local is_current_buf = api.nvim_get_current_buf() == bufnr or bufnr == 0
-  local cursor = (function()
-    if not is_current_buf then
-      return {
-        row = -1,
-        col = -1,
-      }
-    end
-    local cursor = api.nvim_win_get_cursor(0)
-    return {
-      row = cursor[1] - 1,
-      col = cursor[2],
-    }
-  end)()
-
   -- save and restore local marks since they get deleted by nvim_buf_set_lines
   local marks = {}
   for _, m in pairs(vim.fn.getmarklist(bufnr or vim.api.nvim_get_current_buf())) do
@@ -480,7 +463,6 @@ function M.apply_text_edits(text_edits, bufnr, offset_encoding)
   end
 
   -- Apply text edits.
-  local is_cursor_fixed = false
   local has_eol_text_edit = false
   for _, text_edit in ipairs(text_edits) do
     -- Normalize line ending
@@ -527,20 +509,6 @@ function M.apply_text_edits(text_edits, bufnr, offset_encoding)
       e.end_col = math.min(last_line_len, e.end_col)
 
       api.nvim_buf_set_text(bufnr, e.start_row, e.start_col, e.end_row, e.end_col, e.text)
-
-      -- Fix cursor position.
-      local row_count = (e.end_row - e.start_row) + 1
-      if e.end_row < cursor.row then
-        cursor.row = cursor.row + (#e.text - row_count)
-        is_cursor_fixed = true
-      elseif e.end_row == cursor.row and e.end_col <= cursor.col then
-        cursor.row = cursor.row + (#e.text - row_count)
-        cursor.col = #e.text[#e.text] + (cursor.col - e.end_col)
-        if #e.text == 1 then
-          cursor.col = cursor.col + e.start_col
-        end
-        is_cursor_fixed = true
-      end
     end
   end
 
@@ -557,16 +525,6 @@ function M.apply_text_edits(text_edits, bufnr, offset_encoding)
       pos[1] = math.min(pos[1], max)
       pos[2] = math.min(pos[2], #(get_line(bufnr, pos[1] - 1) or ''))
       vim.api.nvim_buf_set_mark(bufnr or 0, mark, pos[1], pos[2], {})
-    end
-  end
-
-  -- Apply fixed cursor position.
-  if is_cursor_fixed then
-    local is_valid_cursor = true
-    is_valid_cursor = is_valid_cursor and cursor.row < max
-    is_valid_cursor = is_valid_cursor and cursor.col <= #(get_line(bufnr, cursor.row) or '')
-    if is_valid_cursor then
-      api.nvim_win_set_cursor(0, { cursor.row + 1, cursor.col })
     end
   end
 
@@ -1087,6 +1045,12 @@ end
 ---        - focusable (string or table) override `focusable`
 ---        - zindex (string or table) override `zindex`, defaults to 50
 ---        - relative ("mouse"|"cursor") defaults to "cursor"
+---        - anchor_bias ("auto"|"above"|"below") defaults to "auto"
+---          - "auto": place window based on which side of the cursor has more lines
+---          - "above": place the window above the cursor unless there are not enough lines
+---            to display the full window height.
+---          - "below": place the window below the cursor unless there are not enough lines
+---            to display the full window height.
 ---@return table Options
 function M.make_floating_popup_options(width, height, opts)
   validate({
@@ -1105,7 +1069,20 @@ function M.make_floating_popup_options(width, height, opts)
     or vim.fn.winline() - 1
   local lines_below = vim.fn.winheight(0) - lines_above
 
-  if lines_above < lines_below then
+  local anchor_bias = opts.anchor_bias or 'auto'
+
+  local anchor_below
+
+  if anchor_bias == 'below' then
+    anchor_below = (lines_below > lines_above) or (height <= lines_below)
+  elseif anchor_bias == 'above' then
+    local anchor_above = (lines_above > lines_below) or (height <= lines_above)
+    anchor_below = not anchor_above
+  else
+    anchor_below = lines_below > lines_above
+  end
+
+  if anchor_below then
     anchor = anchor .. 'N'
     height = math.min(lines_below, height)
     row = 1
@@ -1635,7 +1612,8 @@ end
 ---
 ---@param contents table of lines to show in window
 ---@param syntax string of syntax to set for opened buffer
----@param opts table with optional fields (additional keys are passed on to |nvim_open_win()|)
+---@param opts table with optional fields (additional keys are filtered with |vim.lsp.util.make_floating_popup_options()|
+---                  before they are passed on to |nvim_open_win()|)
 ---             - height: (integer) height of floating window
 ---             - width: (integer) width of floating window
 ---             - wrap: (boolean, default true) wrap long lines
@@ -1812,6 +1790,9 @@ end)
 --- Returns the items with the byte position calculated correctly and in sorted
 --- order, for display in quickfix and location lists.
 ---
+--- The `user_data` field of each resulting item will contain the original
+--- `Location` or `LocationLink` it was computed from.
+---
 --- The result can be passed to the {list} argument of |setqflist()| or
 --- |setloclist()|.
 ---
@@ -1840,7 +1821,7 @@ function M.locations_to_items(locations, offset_encoding)
     -- locations may be Location or LocationLink
     local uri = d.uri or d.targetUri
     local range = d.range or d.targetSelectionRange
-    table.insert(grouped[uri], { start = range.start })
+    table.insert(grouped[uri], { start = range.start, location = d })
   end
 
   local keys = vim.tbl_keys(grouped)
@@ -1872,6 +1853,7 @@ function M.locations_to_items(locations, offset_encoding)
         lnum = row + 1,
         col = col + 1,
         text = line,
+        user_data = temp.location,
       })
     end
   end
@@ -2122,6 +2104,7 @@ end
 function M.make_workspace_params(added, removed)
   return { event = { added = added, removed = removed } }
 end
+
 --- Returns indentation size.
 ---
 ---@see 'shiftwidth'
@@ -2192,32 +2175,46 @@ end
 ---@private
 --- Request updated LSP information for a buffer.
 ---
+---@class lsp.util.RefreshOptions
+---@field bufnr integer? Buffer to refresh (default: 0)
+---@field only_visible? boolean Whether to only refresh for the visible regions of the buffer (default: false)
+---@field client_id? integer Client ID to refresh (default: all clients)
+--
 ---@param method string LSP method to call
----@param opts (nil|table) Optional arguments
----  - bufnr (integer, default: 0): Buffer to refresh
----  - only_visible (boolean, default: false): Whether to only refresh for the visible regions of the buffer
+---@param opts? lsp.util.RefreshOptions Options table
 function M._refresh(method, opts)
   opts = opts or {}
   local bufnr = opts.bufnr
   if bufnr == nil or bufnr == 0 then
     bufnr = api.nvim_get_current_buf()
   end
-  local only_visible = opts.only_visible or false
-  for _, window in ipairs(api.nvim_list_wins()) do
-    if api.nvim_win_get_buf(window) == bufnr then
-      local first = vim.fn.line('w0', window)
-      local last = vim.fn.line('w$', window)
-      local params = {
-        textDocument = M.make_text_document_params(bufnr),
-        range = {
-          start = { line = first - 1, character = 0 },
-          ['end'] = { line = last, character = 0 },
-        },
-      }
-      vim.lsp.buf_request(bufnr, method, params)
-    end
+
+  local clients = vim.lsp.get_clients({ bufnr = bufnr, method = method, id = opts.client_id })
+
+  if #clients == 0 then
+    return
   end
-  if not only_visible then
+
+  local only_visible = opts.only_visible or false
+
+  if only_visible then
+    for _, window in ipairs(api.nvim_list_wins()) do
+      if api.nvim_win_get_buf(window) == bufnr then
+        local first = vim.fn.line('w0', window)
+        local last = vim.fn.line('w$', window)
+        local params = {
+          textDocument = M.make_text_document_params(bufnr),
+          range = {
+            start = { line = first - 1, character = 0 },
+            ['end'] = { line = last, character = 0 },
+          },
+        }
+        for _, client in ipairs(clients) do
+          client.request(method, params, nil, bufnr)
+        end
+      end
+    end
+  else
     local params = {
       textDocument = M.make_text_document_params(bufnr),
       range = {
@@ -2225,7 +2222,9 @@ function M._refresh(method, opts)
         ['end'] = { line = api.nvim_buf_line_count(bufnr), character = 0 },
       },
     }
-    vim.lsp.buf_request(bufnr, method, params)
+    for _, client in ipairs(clients) do
+      client.request(method, params, nil, bufnr)
+    end
   end
 end
 

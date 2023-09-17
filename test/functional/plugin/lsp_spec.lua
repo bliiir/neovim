@@ -1787,7 +1787,7 @@ describe('LSP', function()
         eq({
           'First line of text';
         }, buf_lines(1))
-        eq({ 1, 6 }, funcs.nvim_win_get_cursor(0))
+        eq({ 1, 17 }, funcs.nvim_win_get_cursor(0))
       end)
 
       it('fix the cursor row', function()
@@ -2387,7 +2387,14 @@ describe('LSP', function()
           filename = '/fake/uri',
           lnum = 1,
           col = 3,
-          text = 'testing'
+          text = 'testing',
+          user_data = {
+            uri = 'file:///fake/uri',
+            range = {
+              start = { line = 0, character = 2 },
+              ['end'] = { line = 0, character = 3 },
+            }
+          }
         },
       }
       local actual = exec_lua [[
@@ -2413,7 +2420,18 @@ describe('LSP', function()
           filename = '/fake/uri',
           lnum = 1,
           col = 3,
-          text = 'testing'
+          text = 'testing',
+          user_data = {
+            targetUri = "file:///fake/uri",
+            targetRange = {
+              start = { line = 0, character = 2 },
+              ['end'] = { line = 0, character = 3 },
+            },
+            targetSelectionRange = {
+              start = { line = 0, character = 2 },
+              ['end'] = { line = 0, character = 3 },
+            }
+          }
         },
       }
       local actual = exec_lua [[

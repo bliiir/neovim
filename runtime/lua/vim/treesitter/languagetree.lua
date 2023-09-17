@@ -7,9 +7,9 @@
 ---
 --- To create a LanguageTree (parser object) for a given buffer and language, use:
 ---
---- <pre>lua
----     local parser = vim.treesitter.get_parser(bufnr, lang)
---- </pre>
+--- ```lua
+--- local parser = vim.treesitter.get_parser(bufnr, lang)
+--- ```
 ---
 --- (where `bufnr=0` means current buffer). `lang` defaults to 'filetype'.
 --- Note: currently the parser is retained for the lifetime of a buffer but this may change;
@@ -17,9 +17,9 @@
 ---
 --- Whenever you need to access the current syntax tree, parse the buffer:
 ---
---- <pre>lua
----     local tree = parser:parse({ start_row, end_row })
---- </pre>
+--- ```lua
+--- local tree = parser:parse({ start_row, end_row })
+--- ```
 ---
 --- This returns a table of immutable |treesitter-tree| objects representing the current state of
 --- the buffer. When the plugin wants to access the state after a (possible) edit it must call
@@ -444,18 +444,21 @@ function LanguageTree:parse(range)
     range = range,
   })
 
-  self:for_each_child(function(child)
+  for _, child in pairs(self._children) do
     child:parse(range)
-  end)
+  end
 
   return self._trees
 end
 
+---@deprecated Misleading name. Use `LanguageTree:children()` (non-recursive) instead,
+---            add recursion yourself if needed.
 --- Invokes the callback for each |LanguageTree| and its children recursively
 ---
 ---@param fn fun(tree: LanguageTree, lang: string)
 ---@param include_self boolean|nil Whether to include the invoking tree in the results
 function LanguageTree:for_each_child(fn, include_self)
+  vim.deprecate('LanguageTree:for_each_child()', 'LanguageTree:children()', '0.11')
   if include_self then
     fn(self, self._lang)
   end
@@ -731,7 +734,8 @@ local has_parser = function(lang)
     or #vim.api.nvim_get_runtime_file('parser/' .. lang .. '.*', false) > 0
 end
 
---- Return parser name for language (if exists) or filetype (if registered and exists)
+--- Return parser name for language (if exists) or filetype (if registered and exists).
+--- Also attempts with the input lower-cased.
 ---
 ---@param alias string language or filetype name
 ---@return string? # resolved parser name
@@ -740,7 +744,16 @@ local function resolve_lang(alias)
     return alias
   end
 
+  if has_parser(alias:lower()) then
+    return alias:lower()
+  end
+
   local lang = vim.treesitter.language.get_lang(alias)
+  if lang and has_parser(lang) then
+    return lang
+  end
+
+  lang = vim.treesitter.language.get_lang(alias:lower())
   if lang and has_parser(lang) then
     return lang
   end
@@ -755,9 +768,10 @@ end
 function LanguageTree:_get_injection(match, metadata)
   local ranges = {} ---@type Range6[]
   local combined = metadata['injection.combined'] ~= nil
+  local injection_lang = metadata['injection.language'] --[[@as string?]]
   local lang = metadata['injection.self'] ~= nil and self:lang()
     or metadata['injection.parent'] ~= nil and self._parent_lang
-    or metadata['injection.language'] --[[@as string?]]
+    or (injection_lang and resolve_lang(injection_lang))
   local include_children = metadata['injection.include-children'] ~= nil
 
   for id, node in pairs(match) do
@@ -765,13 +779,26 @@ function LanguageTree:_get_injection(match, metadata)
     -- Lang should override any other language tag
     if name == 'injection.language' then
       local text = vim.treesitter.get_node_text(node, self._source, { metadata = metadata[id] })
-      lang = resolve_lang(text) or resolve_lang(text:lower())
+      lang = resolve_lang(text)
     elseif name == 'injection.content' then
       ranges = get_node_ranges(node, self._source, metadata[id], include_children)
     end
   end
 
   return lang, combined, ranges
+end
+
+--- Can't use vim.tbl_flatten since a range is just a table.
+---@param regions Range6[][]
+---@return Range6[]
+local function combine_regions(regions)
+  local result = {} ---@type Range6[]
+  for _, region in ipairs(regions) do
+    for _, range in ipairs(region) do
+      result[#result + 1] = range
+    end
+  end
+  return result
 end
 
 --- Gets language injection points by language.
@@ -819,11 +846,7 @@ function LanguageTree:_get_injections()
 
       for _, entry in pairs(patterns) do
         if entry.combined then
-          ---@diagnostic disable-next-line:no-unknown
-          local regions = vim.tbl_map(function(e)
-            return vim.tbl_flatten(e)
-          end, entry.regions)
-          table.insert(result[lang], regions)
+          table.insert(result[lang], combine_regions(entry.regions))
         else
           for _, ranges in pairs(entry.regions) do
             table.insert(result[lang], ranges)
@@ -897,6 +920,20 @@ function LanguageTree:_edit(
     end
     return true
   end)
+
+  for _, child in pairs(self._children) do
+    child:_edit(
+      start_byte,
+      end_byte_old,
+      end_byte_new,
+      start_row,
+      start_col,
+      end_row_old,
+      end_col_old,
+      end_row_new,
+      end_col_new
+    )
+  end
 end
 
 ---@package
@@ -943,20 +980,17 @@ function LanguageTree:_on_bytes(
   )
 
   -- Edit trees together BEFORE emitting a bytes callback.
-  ---@private
-  self:for_each_child(function(child)
-    child:_edit(
-      start_byte,
-      start_byte + old_byte,
-      start_byte + new_byte,
-      start_row,
-      start_col,
-      start_row + old_row,
-      old_end_col,
-      start_row + new_row,
-      new_end_col
-    )
-  end, true)
+  self:_edit(
+    start_byte,
+    start_byte + old_byte,
+    start_byte + new_byte,
+    start_row,
+    start_col,
+    start_row + old_row,
+    old_end_col,
+    start_row + new_row,
+    new_end_col
+  )
 
   self:_do_callback(
     'bytes',
@@ -1017,9 +1051,9 @@ function LanguageTree:register_cbs(cbs, recursive)
   end
 
   if recursive then
-    self:for_each_child(function(child)
+    for _, child in pairs(self._children) do
       child:register_cbs(cbs, true)
-    end)
+    end
   end
 end
 

@@ -747,6 +747,7 @@ void buf_clear_file(buf_T *buf)
 void buf_clear(void)
 {
   linenr_T line_count = curbuf->b_ml.ml_line_count;
+  extmark_free_all(curbuf);   // delete any extmarks
   while (!(curbuf->b_ml.ml_flags & ML_EMPTY)) {
     ml_delete((linenr_T)1, false);
   }
@@ -858,9 +859,9 @@ static void free_buffer(buf_T *buf)
   xfree(buf->b_prompt_text);
   callback_free(&buf->b_prompt_callback);
   callback_free(&buf->b_prompt_interrupt);
-  clear_fmark(&buf->b_last_cursor);
-  clear_fmark(&buf->b_last_insert);
-  clear_fmark(&buf->b_last_change);
+  clear_fmark(&buf->b_last_cursor, 0);
+  clear_fmark(&buf->b_last_insert, 0);
+  clear_fmark(&buf->b_last_change, 0);
   for (size_t i = 0; i < NMARKS; i++) {
     free_fmark(buf->b_namedm[i]);
   }
@@ -1910,7 +1911,7 @@ buf_T *buflist_new(char *ffname_arg, char *sfname_arg, linenr_T lnum, int flags)
     buf->b_flags |= BF_DUMMY;
   }
   buf_clear_file(buf);
-  clrallmarks(buf);                     // clear marks
+  clrallmarks(buf, 0);                  // clear marks
   fmarks_check_names(buf);              // check file marks for this file
   buf->b_p_bl = (flags & BLN_LISTED) ? true : false;    // init 'buflisted'
   kv_destroy(buf->update_channels);

@@ -154,9 +154,9 @@ static void build_meta(lua_State *L, const char *tname, const luaL_Reg *meta)
   lua_pop(L, 1);  // [] (don't use it now)
 }
 
-/// init the tslua library
+/// Init the tslua library.
 ///
-/// all global state is stored in the regirstry of the lua_State
+/// All global state is stored in the registry of the lua_State.
 void tslua_init(lua_State *L)
 {
   // type metatables
@@ -173,7 +173,7 @@ void tslua_init(lua_State *L)
 int tslua_has_language(lua_State *L)
 {
   const char *lang_name = luaL_checkstring(L, 1);
-  lua_pushboolean(L, pmap_has(cstr_t)(&langs, lang_name));
+  lua_pushboolean(L, map_has(cstr_t, &langs, lang_name));
   return 1;
 }
 
@@ -190,7 +190,7 @@ int tslua_add_language(lua_State *L)
     symbol_name = luaL_checkstring(L, 3);
   }
 
-  if (pmap_has(cstr_t)(&langs, lang_name)) {
+  if (map_has(cstr_t, &langs, lang_name)) {
     lua_pushboolean(L, true);
     return 1;
   }
@@ -243,7 +243,7 @@ int tslua_add_language(lua_State *L)
 int tslua_remove_lang(lua_State *L)
 {
   const char *lang_name = luaL_checkstring(L, 1);
-  bool present = pmap_has(cstr_t)(&langs, lang_name);
+  bool present = map_has(cstr_t, &langs, lang_name);
   if (present) {
     cstr_t key;
     pmap_del(cstr_t)(&langs, lang_name, &key);
@@ -775,16 +775,17 @@ static int parser_get_logger(lua_State *L)
 
 // Tree methods
 
-/// push tree interface on lua stack.
+/// Push tree interface on to the lua stack.
 ///
-/// The tree is not copied. Ownership of the tree is transfered from c code to
-/// lua. if needed use ts_tree_copy() in the caller
-void push_tree(lua_State *L, TSTree *tree)
+/// The tree is not copied. Ownership of the tree is transferred from C to
+/// Lua. If needed use ts_tree_copy() in the caller
+static void push_tree(lua_State *L, TSTree *tree)
 {
   if (tree == NULL) {
     lua_pushnil(L);
     return;
   }
+
   TSLuaTree *ud = lua_newuserdata(L, sizeof(TSLuaTree));  // [udata]
 
   ud->tree = tree;
@@ -792,9 +793,10 @@ void push_tree(lua_State *L, TSTree *tree)
   lua_getfield(L, LUA_REGISTRYINDEX, TS_META_TREE);  // [udata, meta]
   lua_setmetatable(L, -2);  // [udata]
 
-  // table used for node wrappers to keep a reference to tree wrapper
-  // NB: in lua 5.3 the uservalue for the node could just be the tree, but
-  // in lua 5.1 the uservalue (fenv) must be a table.
+  // To prevent the tree from being garbage collected, create a reference to it
+  // in the fenv which will be passed to userdata nodes of the tree.
+  // Note: environments (fenvs) associated with userdata have no meaning in Lua
+  // and are only used to associate a table.
   lua_createtable(L, 1, 0);  // [udata, reftable]
   lua_pushvalue(L, -2);  // [udata, reftable, udata]
   lua_rawseti(L, -2, 1);  // [udata, reftable]
@@ -835,9 +837,9 @@ static int tree_root(lua_State *L)
 
 // Node methods
 
-/// push node interface on lua stack
+/// Push node interface on to the Lua stack
 ///
-/// top of stack must either be the tree this node belongs to or another node
+/// Top of stack must either be the tree this node belongs to or another node
 /// of the same tree! This value is not popped. Can only be called inside a
 /// cfunction with the tslua environment.
 static void push_node(lua_State *L, TSNode node, int uindex)
@@ -851,6 +853,8 @@ static void push_node(lua_State *L, TSNode node, int uindex)
   *ud = node;
   lua_getfield(L, LUA_REGISTRYINDEX, TS_META_NODE);  // [udata, meta]
   lua_setmetatable(L, -2);  // [udata]
+
+  // Copy the fenv which contains the nodes tree.
   lua_getfenv(L, uindex);  // [udata, reftable]
   lua_setfenv(L, -2);  // [udata]
 }
@@ -1539,8 +1543,9 @@ int tslua_parse_query(lua_State *L)
   TSQuery *query = ts_query_new(lang, src, (uint32_t)len, &error_offset, &error_type);
 
   if (!query) {
-    return luaL_error(L, "query: %s at position %d for language %s",
-                      query_err_string(error_type), (int)error_offset, lang_name);
+    char err_msg[IOSIZE];
+    query_err_string(src, (int)error_offset, error_type, err_msg, sizeof(err_msg));
+    return luaL_error(L, "%s", err_msg);
   }
 
   TSQuery **ud = lua_newuserdata(L, sizeof(TSQuery *));  // [udata]
@@ -1550,22 +1555,77 @@ int tslua_parse_query(lua_State *L)
   return 1;
 }
 
-static const char *query_err_string(TSQueryError err)
+static const char *query_err_to_string(TSQueryError error_type)
 {
-  switch (err) {
+  switch (error_type) {
   case TSQueryErrorSyntax:
-    return "invalid syntax";
+    return "Invalid syntax:\n";
   case TSQueryErrorNodeType:
-    return "invalid node type";
+    return "Invalid node type ";
   case TSQueryErrorField:
-    return "invalid field";
+    return "Invalid field name ";
   case TSQueryErrorCapture:
-    return "invalid capture";
+    return "Invalid capture name ";
   case TSQueryErrorStructure:
-    return "invalid structure";
+    return "Impossible pattern:\n";
   default:
     return "error";
   }
+}
+
+static void query_err_string(const char *src, int error_offset, TSQueryError error_type, char *err,
+                             size_t errlen)
+{
+  int line_start = 0;
+  int row = 0;
+  const char *error_line = NULL;
+  int error_line_len = 0;
+
+  const char *end_str;
+  do {
+    const char *src_tmp = src + line_start;
+    end_str = strchr(src_tmp, '\n');
+    int line_length  = end_str != NULL ? (int)(end_str - src_tmp) : (int)strlen(src_tmp);
+    int line_end = line_start + line_length;
+    if (line_end > error_offset) {
+      error_line = src_tmp;
+      error_line_len = line_length;
+      break;
+    }
+    line_start = line_end + 1;
+    row++;
+  } while (end_str != NULL);
+
+  int column = error_offset - line_start;
+
+  const char *type_msg = query_err_to_string(error_type);
+  snprintf(err, errlen, "Query error at %d:%d. %s", row + 1, column + 1, type_msg);
+  size_t offset = strlen(err);
+  errlen = errlen - offset;
+  err = err + offset;
+
+  // Error types that report names
+  if (error_type == TSQueryErrorNodeType
+      || error_type == TSQueryErrorField
+      || error_type == TSQueryErrorCapture) {
+    const char *suffix = src + error_offset;
+    int suffix_len = 0;
+    char c = suffix[suffix_len];
+    while (isalnum(c) || c == '_' || c == '-' || c == '.') {
+      c = suffix[++suffix_len];
+    }
+    snprintf(err, errlen, "\"%.*s\":\n", suffix_len, suffix);
+    offset = strlen(err);
+    errlen = errlen - offset;
+    err = err + offset;
+  }
+
+  if (!error_line) {
+    snprintf(err, errlen, "Unexpected EOF\n");
+    return;
+  }
+
+  snprintf(err, errlen, "%.*s\n%*s^\n", error_line_len, error_line, column, "");
 }
 
 static TSQuery *query_check(lua_State *L, int index)

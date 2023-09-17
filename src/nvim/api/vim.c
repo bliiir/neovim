@@ -96,6 +96,7 @@ Integer nvim_get_hl_id_by_name(String name)
 ///                 - name: (string) Get a highlight definition by name.
 ///                 - id: (integer) Get a highlight definition by id.
 ///                 - link: (boolean, default true) Show linked group name instead of effective definition |:hi-link|.
+///                 - create: (boolean, default true) When highlight group doesn't exist create it.
 ///
 /// @param[out] err Error details, if any.
 /// @return Highlight groups as a map from group name to a highlight definition map as in |nvim_set_hl()|,
@@ -211,10 +212,11 @@ void nvim_set_hl_ns_fast(Integer ns_id, Error *err)
 /// nvim_feedkeys().
 ///
 /// Example:
-/// <pre>vim
-///     :let key = nvim_replace_termcodes("<C-o>", v:true, v:false, v:true)
-///     :call nvim_feedkeys(key, 'n', v:false)
-/// </pre>
+///
+/// ```vim
+/// :let key = nvim_replace_termcodes("<C-o>", v:true, v:false, v:true)
+/// :call nvim_feedkeys(key, 'n', v:false)
+/// ```
 ///
 /// @param keys         to be typed
 /// @param mode         behavior flags, see |feedkeys()|
@@ -1279,10 +1281,11 @@ void nvim_unsubscribe(uint64_t channel_id, String event)
 /// "#rrggbb" hexadecimal string.
 ///
 /// Example:
-/// <pre>vim
-///     :echo nvim_get_color_by_name("Pink")
-///     :echo nvim_get_color_by_name("#cbcbcb")
-/// </pre>
+///
+/// ```vim
+/// :echo nvim_get_color_by_name("Pink")
+/// :echo nvim_get_color_by_name("#cbcbcb")
+/// ```
 ///
 /// @param name Color name or "#rrggbb" string
 /// @return 24-bit RGB value, or -1 for invalid argument.
@@ -1419,14 +1422,16 @@ ArrayOf(Dictionary) nvim_get_keymap(String mode)
 /// Empty {rhs} is |<Nop>|. |keycodes| are replaced as usual.
 ///
 /// Example:
-/// <pre>vim
-///     call nvim_set_keymap('n', ' <NL>', '', {'nowait': v:true})
-/// </pre>
+///
+/// ```vim
+/// call nvim_set_keymap('n', ' <NL>', '', {'nowait': v:true})
+/// ```
 ///
 /// is equivalent to:
-/// <pre>vim
-///     nmap <nowait> <Space><NL> <Nop>
-/// </pre>
+///
+/// ```vim
+/// nmap <nowait> <Space><NL> <Nop>
+/// ```
 ///
 /// @param channel_id
 /// @param  mode  Mode short-name (map command prefix: "n", "i", "v", "x", …)

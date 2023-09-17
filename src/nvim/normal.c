@@ -831,7 +831,7 @@ static void normal_get_additional_char(NormalState *s)
       // because if it's put back with vungetc() it's too late to apply
       // mapping.
       no_mapping--;
-      while (lang && (s->c = vpeekc()) > 0
+      while ((s->c = vpeekc()) > 0
              && (s->c >= 0x100 || MB_BYTE2LEN(vpeekc()) > 1)) {
         s->c = plain_vgetc();
         if (!utf_iscomposing(s->c)) {
@@ -848,7 +848,9 @@ static void normal_get_additional_char(NormalState *s)
       // but when replaying a recording the next key is already in the
       // typeahead buffer, so record a <Nop> before that to prevent the
       // vpeekc() above from applying wrong mappings when replaying.
+      no_u_sync++;
       gotchars_nop();
+      no_u_sync--;
     }
   }
   no_mapping--;
@@ -2350,13 +2352,13 @@ bool find_decl(char *ptr, size_t len, bool locally, bool thisblock, int flags_ar
   bool incll;
   int searchflags = flags_arg;
 
-  pat = xmalloc(len + 7);
+  size_t patlen = len + 7;
+  pat = xmalloc(patlen);
 
   // Put "\V" before the pattern to avoid that the special meaning of "."
   // and "~" causes trouble.
-  assert(len <= INT_MAX);
-  sprintf(pat, vim_iswordp(ptr) ? "\\V\\<%.*s\\>" : "\\V%.*s",  // NOLINT(runtime/printf)
-          (int)len, ptr);
+  assert(patlen <= INT_MAX);
+  snprintf(pat, patlen, vim_iswordp(ptr) ? "\\V\\<%.*s\\>" : "\\V%.*s", (int)len, ptr);
   old_pos = curwin->w_cursor;
   save_p_ws = p_ws;
   save_p_scs = p_scs;

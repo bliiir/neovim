@@ -51,9 +51,6 @@
 // There are marks 'A - 'Z (set by user) and '0 to '9 (set when writing
 // shada).
 
-/// Global marks (marks with file number or name)
-static xfmark_T namedfm[NGLOBALMARKS];
-
 #ifdef INCLUDE_GENERATED_DECLARATIONS
 # include "mark.c.generated.h"
 #endif
@@ -80,11 +77,12 @@ void free_xfmark(xfmark_T fm)
 }
 
 /// Free and clear fmark_T item
-void clear_fmark(fmark_T *fm)
+void clear_fmark(fmark_T *const fm, const Timestamp timestamp)
   FUNC_ATTR_NONNULL_ALL
 {
   free_fmark(*fm);
   *fm = (fmark_T)INIT_FMARK;
+  fm->timestamp = timestamp;
 }
 
 // Set named mark "c" to position "pos".
@@ -766,20 +764,20 @@ bool mark_check_line_bounds(buf_T *buf, fmark_T *fm, const char **errormsg)
 /// Used mainly when trashing the entire buffer during ":e" type commands.
 ///
 /// @param[out]  buf  Buffer to clear marks in.
-void clrallmarks(buf_T *const buf)
+void clrallmarks(buf_T *const buf, const Timestamp timestamp)
   FUNC_ATTR_NONNULL_ALL
 {
   for (size_t i = 0; i < NMARKS; i++) {
-    clear_fmark(&buf->b_namedm[i]);
+    clear_fmark(&buf->b_namedm[i], timestamp);
   }
-  clear_fmark(&buf->b_last_cursor);
+  clear_fmark(&buf->b_last_cursor, timestamp);
   buf->b_last_cursor.mark.lnum = 1;
-  clear_fmark(&buf->b_last_insert);
-  clear_fmark(&buf->b_last_change);
+  clear_fmark(&buf->b_last_insert, timestamp);
+  clear_fmark(&buf->b_last_change, timestamp);
   buf->b_op_start.lnum = 0;  // start/end op mark cleared
   buf->b_op_end.lnum = 0;
   for (int i = 0; i < buf->b_changelistlen; i++) {
-    clear_fmark(&buf->b_changelist[i]);
+    clear_fmark(&buf->b_changelist[i], timestamp);
   }
   buf->b_changelistlen = 0;
 }
@@ -928,13 +926,14 @@ void ex_delmarks(exarg_T *eap)
 
   if (*eap->arg == NUL && eap->forceit) {
     // clear all marks
-    clrallmarks(curbuf);
+    clrallmarks(curbuf, os_time());
   } else if (eap->forceit) {
     emsg(_(e_invarg));
   } else if (*eap->arg == NUL) {
     emsg(_(e_argreq));
   } else {
     // clear specified marks only
+    const Timestamp timestamp = os_time();
     for (p = eap->arg; *p != NUL; p++) {
       lower = ASCII_ISLOWER(*p);
       digit = ascii_isdigit(*p);
@@ -959,6 +958,7 @@ void ex_delmarks(exarg_T *eap)
         for (int i = from; i <= to; i++) {
           if (lower) {
             curbuf->b_namedm[i - 'a'].mark.lnum = 0;
+            curbuf->b_namedm[i - 'a'].timestamp = timestamp;
           } else {
             if (digit) {
               n = i - '0' + NMARKS;
@@ -967,17 +967,21 @@ void ex_delmarks(exarg_T *eap)
             }
             namedfm[n].fmark.mark.lnum = 0;
             namedfm[n].fmark.fnum = 0;
+            namedfm[n].fmark.timestamp = timestamp;
             XFREE_CLEAR(namedfm[n].fname);
           }
         }
       } else {
         switch (*p) {
         case '"':
-          CLEAR_FMARK(&curbuf->b_last_cursor); break;
+          clear_fmark(&curbuf->b_last_cursor, timestamp);
+          break;
         case '^':
-          CLEAR_FMARK(&curbuf->b_last_insert); break;
+          clear_fmark(&curbuf->b_last_insert, timestamp);
+          break;
         case '.':
-          CLEAR_FMARK(&curbuf->b_last_change); break;
+          clear_fmark(&curbuf->b_last_change, timestamp);
+          break;
         case '[':
           curbuf->b_op_start.lnum    = 0; break;
         case ']':

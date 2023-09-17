@@ -3579,6 +3579,7 @@ static void ins_insert(int replaceState)
 // Pressed CTRL-O in Insert mode.
 static void ins_ctrl_o(void)
 {
+  restart_VIsual_select = 0;
   if (State & VREPLACE_FLAG) {
     restart_edit = 'V';
   } else if (State & REPLACE_FLAG) {
@@ -4428,9 +4429,8 @@ static bool ins_tab(void)
           }
         }
         if (!(State & VREPLACE_FLAG)) {
-          extmark_splice_cols(curbuf, (int)fpos.lnum - 1, change_col,
-                              cursor->col - change_col, fpos.col - change_col,
-                              kExtmarkUndo);
+          inserted_bytes(fpos.lnum, change_col,
+                         cursor->col - change_col, fpos.col - change_col);
         }
       }
       cursor->col -= i;

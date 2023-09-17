@@ -2,7 +2,7 @@ add_library(main_lib INTERFACE)
 add_executable(nvim main.c)
 
 add_library(libuv INTERFACE)
-find_package(libuv CONFIG)
+find_package(libuv CONFIG QUIET)
 if(TARGET libuv::uv_a)
   target_link_libraries(libuv INTERFACE libuv::uv_a)
   mark_as_advanced(libuv_DIR)
@@ -90,7 +90,7 @@ if(MSVC)
   target_compile_options(main_lib INTERFACE -W3)
 
   # Disable warnings that give too many false positives.
-  target_compile_options(main_lib INTERFACE -wd4311 -wd4146)
+  target_compile_options(main_lib INTERFACE -wd4311 -wd4146 -wd4003)
   target_compile_definitions(main_lib INTERFACE _CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_DEPRECATE)
 
   target_sources(main_lib INTERFACE ${CMAKE_CURRENT_LIST_DIR}/os/nvim.manifest)
@@ -392,7 +392,7 @@ else()
 endif()
 
 # Log level (NVIM_LOG_DEBUG in log.h)
-if($ENV{CI})
+if(CI_BUILD)
   # Don't debug log on CI, it gets too verbose in the main build log.
   # TODO(bfredl): debug log level also exposes some errors with EXITFREE in ASAN build.
 else()
@@ -703,6 +703,7 @@ if(WIN32)
       -D CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}
       -D BINARY="${PROJECT_BINARY_DIR}/bin/nvim${CMAKE_EXECUTABLE_SUFFIX}"
       -D DST=${PROJECT_BINARY_DIR}/windows_runtime_deps
+      -D CI_BUILD=${CI_BUILD}
       -P ${PROJECT_SOURCE_DIR}/cmake/WindowsDllCopy.cmake)
   add_dependencies(nvim_runtime_deps nvim_dll_deps)
 
